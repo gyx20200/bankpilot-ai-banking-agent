@@ -1,0 +1,15 @@
+# secrets, environment, generated code
+.env
+.env.*
+!.env.example
+*.log
+__pycache__/
+.venv/
+venv/
+node_modules/
+dist/
+target/
+.idea/
+.vscode/
+*.iml
+.DS_Store
