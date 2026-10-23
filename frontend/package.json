@@ -1,9 +1,18 @@
 {
-  "name": "bankpilot-day1-frontend",
-  "version": "0.1.0",
+  "name": "bankpilot-day2-frontend",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "scripts": { "dev": "vite --host 127.0.0.1", "build": "vite build", "preview": "vite preview" },
-  "dependencies": { "vue": "^3.5.0" },
-  "devDependencies": { "@vitejs/plugin-vue": "^5.2.0", "vite": "^6.2.0" }
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.0",
+    "vite": "^6.2.0"
+  }
 }
