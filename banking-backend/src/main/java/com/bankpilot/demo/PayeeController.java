@@ -30,6 +30,6 @@ public class PayeeController {
         return jdbc.query(sql, (rs, rowNum) -> new PayeeView(
             rs.getLong("id"), rs.getString("payee_name"),
             AccountMasker.mask(rs.getString("account_no"))
-        ), DemoUser.ID);
+        ), AuthenticatedUser.id());
     }
 }

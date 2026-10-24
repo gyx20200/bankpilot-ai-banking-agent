@@ -36,6 +36,6 @@ public class SubscriptionController {
                 rs.getBigDecimal("amount"), rs.getString("billing_cycle"),
                 rs.getString("status"), date == null ? null : date.toLocalDate().toString()
             );
-        }, DemoUser.ID);
+        }, AuthenticatedUser.id());
     }
 }

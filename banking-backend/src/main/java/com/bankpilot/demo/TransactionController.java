@@ -38,6 +38,6 @@ public class TransactionController {
             rs.getString("category"), rs.getString("merchant_name"),
             rs.getString("description"),
             rs.getTimestamp("occurred_at").toLocalDateTime().format(TIME_FORMAT)
-        ), DemoUser.ID);
+        ), AuthenticatedUser.id());
     }
 }

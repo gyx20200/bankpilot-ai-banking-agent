@@ -3,8 +3,14 @@ package com.bankpilot.demo;
 import static org.assertj.core.api.Assertions.assertThat;
 import java.math.BigDecimal;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import java.util.List;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.JdbcTest;
+import org.springframework.test.context.TestPropertySource;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
@@ -12,8 +18,18 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * MySQL + Java + Python acceptance is separately tested by tests/day2_smoke_test.py.
  */
 @JdbcTest
+@TestPropertySource(properties = "spring.datasource.url=jdbc:h2:mem:bankpilotday3readonly;DB_CLOSE_DELAY=-1")
 class BankingReadOnlyTest {
     @Autowired JdbcTemplate jdbc;
+
+    @BeforeEach
+    void authenticatedDemoUser() {
+        SecurityContextHolder.getContext().setAuthentication(
+            new UsernamePasswordAuthenticationToken(new BankPrincipal(1L, "张小明"), null, List.of()));
+    }
+
+    @AfterEach
+    void clearAuthentication() { SecurityContextHolder.clearContext(); }
 
     @Test
     void balanceIsLoadedFromDatabaseAndMasked() {
