@@ -8,7 +8,7 @@ ORDER={'orderId':'MOCK-1001','amount':'200.00','riskLevel':'YELLOW','status':'PE
 
 
 def test_health():
-    assert client.get('/health').json()['mode'] == 'rules-day4'
+    assert client.get('/health').json()['mode'] == 'rules-day5'
 
 
 def test_unknown_chat_cannot_execute():
