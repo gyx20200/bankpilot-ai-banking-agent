@@ -1,6 +1,6 @@
 {
-  "name": "bankpilot-day2-frontend",
-  "version": "0.2.0",
+  "name": "bankpilot-day3-frontend",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {

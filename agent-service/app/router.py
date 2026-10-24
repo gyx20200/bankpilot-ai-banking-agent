@@ -1,19 +1,19 @@
-"""Day 2 local intent router. Replace with LLM structured intent router on Day 5.
-
-This is intentionally a read-only router: no user text can trigger a write.
-"""
-
+"""Day 3 rules router. Transfer only PREPARES an order, never executes it."""
 from typing import Literal
+from app.transfer_parser import parse_transfer
 
-Intent = Literal["balance", "transactions", "payees", "subscriptions", "unsupported"]
+Intent = Literal["balance", "transactions", "payees", "subscriptions", "transfer", "unsupported"]
 
 
 def parse_intent(message: str) -> Intent:
     text = "".join(message.lower().split())
     if not text:
         return "unsupported"
-
-    # Match more specific terms first. One intent per request in Day 2.
+    if parse_transfer(message) is not None:
+        return "transfer"
+    # Explicitly refuse bypass-instruction transfers rather than route as a read query.
+    if any(w in text for w in ("不用确认", "免验证", "跳过验证", "忽略权限")):
+        return "unsupported"
     if any(w in text for w in ("代扣", "订阅", "自动扣", "续费", "会员")):
         return "subscriptions"
     if any(w in text for w in ("收款人", "联系人", "转账对象", "常用朋友")):

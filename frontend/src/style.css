@@ -36,3 +36,31 @@
 @media(max-width:480px){.header{flex-direction:column;align-items:flex-start}.welcome-card{padding:16px}.welcome-card h2{font-size:18px}.shortcuts button{flex:1 1 40%}.footer button{padding:0 14px}.footer input{font-size:13px}}
 
 .mock-warning {font-size:11px;color:#965d15;background:#fff2d8;border-radius:8px;padding:8px 10px;margin-top:8px}
+
+/* Day 3 additions */
+.dev-auth {background:#fdfefe;border-bottom:1px solid #e4ebf5;padding:12px 32px}
+.dev-auth-title {font-weight:700;color:#34506d;font-size:12px;display:flex;gap:8px;align-items:center}
+.dev-auth-title span {font-weight:400;color:#8496a7}
+.dev-auth-form {display:flex;align-items:center;gap:10px;margin-top:8px}
+.dev-auth-form input {flex:1;min-width:0;border:1px solid #cbd7e6;border-radius:8px;padding:10px 12px;font-size:12px}
+.dev-auth-form button {font-size:12px;background:#e7effc;color:#235b9c;border:1px solid #c9d9f0;border-radius:8px;padding:10px}
+.dev-auth p {margin:7px 0 0;font-size:11px;color:#7b8fa1}
+.mode-pill {font-size:11px;padding:7px 9px;border-radius:7px;background:#eff3f8;color:#5a6d81;white-space:nowrap}
+.transfer-fields {display:grid;gap:12px;margin-top:14px}
+.transfer-fields label {font-size:12px;font-weight:600;color:#586b80;display:grid;gap:5px}
+.transfer-fields select,.transfer-fields input {width:100%;min-height:40px;border:1px solid #d2ddeb;border-radius:9px;background:#fff;color:#23364e;padding:10px;outline:none}
+.transfer-fields select:focus,.transfer-fields input:focus {border-color:#397fd2}
+.action-primary {border:0;border-radius:10px;background:#1f63b5;color:white;font-weight:700;padding:12px 16px;min-height:42px}
+.security-note {font-size:11px;color:#7c8a9c;line-height:1.6;margin:11px 0 0}
+.validation-error {font-size:12px;color:#b23636;background:#fff0f0;border-radius:8px;padding:9px}
+.order-heading {display:flex;justify-content:space-between;align-items:center;font-size:13px;font-weight:700;gap:10px}
+.order-money {font-size:30px;color:#183e74;font-weight:800;text-align:center;margin:16px 0 18px}
+.risk-badge {display:inline-block;font-size:11px;font-weight:700;padding:5px 7px;border-radius:8px}
+.risk-yellow {background:#fff5d8;color:#97621e}.risk-red {background:#ffe9e9;color:#b34444}
+.order-details {margin:0}
+.order-details div {display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-top:1px solid #e9eef5;font-size:13px}
+.order-details dt {color:#8291a3}.order-details dd {margin:0;color:#1d344c;font-weight:650}
+.break-id {overflow-wrap:anywhere;word-break:break-all;text-align:right}
+.order-awaiting {background:#f4f7fd;border-radius:9px;padding:11px;font-size:12px;color:#536f96;margin-top:12px;line-height:1.6}
+@media(max-width:840px){.dev-auth{padding:12px 18px}}
+@media(max-width:600px){.dev-auth-form{flex-wrap:wrap}.mode-pill{margin-left:auto}.order-heading{align-items:flex-start}}
