@@ -1,193 +1,63 @@
 <script setup>
-import { ref, onMounted, nextTick } from 'vue'
+import {ref,nextTick,onMounted} from 'vue'
 import TransferForm from './components/TransferForm.vue'
 import TransferOrderCard from './components/TransferOrderCard.vue'
-
-const shortcuts = [
-  { label: '查询余额', message: '我的余额是多少', icon: '◉' },
-  { label: '交易流水', message: '查询最近交易', icon: '▤' },
-  { label: '常用收款人', message: '我的常用收款人', icon: '♙' },
-  { label: '订阅代扣', message: '有哪些自动扣费', icon: '▣' },
-  { label: '智能转账', message: '给李四转200元', icon: '↗' },
-  { label: '转账参数补全', message: '给李四转', icon: '✎' }
-]
-
-const messages = ref([{
-  id: 'welcome', role: 'assistant', content: '你好，我是 BankPilot。支持四种模拟银行查询，以及自然语言创建转账待确认订单。Day 3 不执行扣款。', intent: 'welcome', data: null
-}])
-const input = ref('')
-const authToken = ref('') // In-memory only. NEVER persist to localStorage, URL or logs.
-const bankMode = ref('java')
-const busy = ref(false)
-const completedRequests = ref([])
-const status = ref('连接检测中')
-const endRef = ref(null)
-
-function amount(value) {
-  if (value === undefined || value === null || value === '') return '—'
-  const num = Number(value)
-  return Number.isFinite(num) ? new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY' }).format(num) : '—'
+const messages=ref([{id:'welcome',role:'assistant',reply:'你好，我是 BankPilot。本地模拟银行支持账户查询和带审批的模拟转账。',intent:'welcome'}])
+const input=ref('')
+const token=ref('')  // Developer demo only; in-memory, never localStorage
+const mode=ref('java')
+const connected=ref(false)
+const busy=ref(false)
+const completedForms=ref([])
+const lastRef=ref(null)
+const queries=['查询余额','最近交易','常用收款人','订阅代扣','给李四转200元','给李四转1500元','给李四转']
+const toSay={'查询余额':'我的余额是多少','最近交易':'查询最近交易','常用收款人':'我的常用收款人','订阅代扣':'有哪些自动扣费'}
+async function scroll(){await nextTick();lastRef.value?.scrollIntoView({behavior:'smooth',block:'end'})}
+function headers(){const h={'Content-Type':'application/json'};if(token.value.trim())h.Authorization=`Bearer ${token.value.trim()}`;return h}
+async function req(url,method='GET',body){const options={method,headers:headers(),signal:AbortSignal.timeout(14000)};if(body)options.body=JSON.stringify(body);const r=await fetch(url,options);const data=await r.json().catch(()=>({}));if(!r.ok)throw Error(data.detail||`HTTP ${r.status}`);return data}
+function addMessage(obj){messages.value.push({id:crypto.randomUUID(),role:'assistant',...obj})}
+function errorMessage(e){addMessage({intent:'error',reply:`处理异常：${e.message}。请通过“刷新订单状态”检查是否已执行，勿盲目重复提交。`})}
+function replaceOrder(newData){
+ const id=String(newData.orderId)
+ for(const m of messages.value){if(m.intent==='transfer'&&m.data?.orderId&&String(m.data.orderId)===id){m.data={...newData};m.action='status'}}
 }
-function dateOf(row) { return row.occurredAt ?? row.occurred_at ?? '—' }
-function payeeOf(row) { return row.payeeName ?? row.payee_name ?? '—' }
-function payeeAccountOf(row) { return row.payeeAccountMasked ?? row.payee_account_masked ?? '—' }
-function merchantOf(row) { return row.merchantName ?? row.merchant_name ?? '—' }
-function cycleOf(row) { return row.billingCycle === 'MONTHLY' ? '每月' : (row.billingCycle ?? '—') }
-function nextPayOf(row) { return row.nextPayDate ?? row.next_pay_date ?? '—' }
-function apiHeaders() {
-  const headers = { 'Content-Type': 'application/json' }
-  if (authToken.value.trim()) headers.Authorization = `Bearer ${authToken.value.trim()}`
-  return headers
+async function checkHealth(){try{const x=await req('/api/agent/health');mode.value=x.bankMode==='mock'?'mock':'java';connected.value=true}catch{connected.value=false}}
+async function send(text){const s=String(text||input.value).trim();if(!s||busy.value)return;input.value='';busy.value=true;messages.value.push({id:crypto.randomUUID(),role:'user',reply:s});await scroll();try{addMessage(await req('/api/agent/chat','POST',{message:toSay[s]||s,requestId:crypto.randomUUID()}))}catch(e){errorMessage(e)}finally{busy.value=false;await scroll()}}
+async function prepare(form){if(busy.value||completedForms.value.includes(form.requestId))return;busy.value=true;try{const data=await req('/api/agent/transfers/prepare','POST',form);completedForms.value.push(form.requestId);addMessage(data)}catch(e){errorMessage(e)}finally{busy.value=false;await scroll()}}
+async function doAction(action,orderId,payload={}){
+ if(busy.value)return
+ busy.value=true
+ try{const r=await req(`/api/agent/transfers/${encodeURIComponent(String(orderId))}/${action}`,'POST',{requestId:crypto.randomUUID(),...payload});replaceOrder(r.data);addMessage({reply:r.reply,intent:'event',action:r.action})}catch(e){errorMessage(e)}finally{busy.value=false;await scroll()}
 }
-function addResponse(payload) {
-  messages.value.push({ id: crypto.randomUUID(), role: 'assistant', content: payload.reply,
-    intent: payload.intent, action: payload.action, data: payload.data, source: payload.source, requestId: payload.requestId })
-}
-function addError(message) {
-  messages.value.push({ id: crypto.randomUUID(), role: 'assistant', content: `请求失败：${message}。请检查对应服务和接口授权。`, intent: 'error' })
-}
-async function scrollToBottom() { await nextTick(); endRef.value?.scrollIntoView({ behavior: 'smooth', block: 'end' }) }
-
-async function checkHealth() {
-  try {
-    const r = await fetch('/api/agent/health', { signal: AbortSignal.timeout(4000) })
-    if (!r.ok) throw new Error('Agent service unavailable')
-    const payload = await r.json()
-    bankMode.value = payload.bankMode === 'mock' ? 'mock' : 'java'
-    status.value = '交互服务已连接'
-  } catch {
-    status.value = '交互服务未连接'
-  }
-}
-
-async function postJson(path, body) {
-  const response = await fetch(path, { method: 'POST', headers: apiHeaders(), body: JSON.stringify(body), signal: AbortSignal.timeout(15000) })
-  const payload = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error(typeof payload.detail === 'string' ? payload.detail : `HTTP ${response.status}`)
-  return payload
-}
-
-async function send(message) {
-  const text = String(message ?? input.value).trim()
-  if (!text || busy.value) return
-  input.value = ''
-  const requestId = crypto.randomUUID()
-  messages.value.push({ id: crypto.randomUUID(), role: 'user', content: text })
-  busy.value = true
-  await scrollToBottom()
-  try {
-    addResponse(await postJson('/api/agent/chat', { message: text, requestId }))
-  } catch (err) {
-    addError(err.message)
-  } finally {
-    busy.value = false
-    await scrollToBottom()
-  }
-}
-
-async function submitTransfer(form) {
-  if (busy.value || completedRequests.value.includes(form.requestId)) return
-  busy.value = true
-  try {
-    const result = await postJson('/api/agent/transfers/prepare', form)
-    addResponse(result)
-    completedRequests.value.push(form.requestId)
-  } catch (err) {
-    addError(err.message)
-  } finally {
-    busy.value = false
-    await scrollToBottom()
-  }
-}
-
+async function refresh(orderId){if(busy.value)return;busy.value=true;try{const r=await req(`/api/agent/transfers/${encodeURIComponent(String(orderId))}`);replaceOrder(r.data)}catch(e){errorMessage(e)}finally{busy.value=false;await scroll()}}
+const money=x=>new Intl.NumberFormat('zh-CN',{style:'currency',currency:'CNY'}).format(Number(x))
+const merchant=x=>x.merchantName??x.merchant_name??'—'
+const when=x=>x.occurredAt??x.occurred_at??'—'
 onMounted(checkHealth)
 </script>
-
 <template>
-  <div class="layout">
-    <aside class="sidebar">
-      <div class="brand"><div class="brand-icon">B</div><div><strong>BankPilot</strong><small>AI Banking Agent</small></div></div>
-      <div class="side-heading">项目进度</div>
-      <div class="progress-item done">✓ Day 1 · 环境搭建</div>
-      <div class="progress-item done">✓ Day 2 · 银行查询</div>
-      <div class="progress-item active">● Day 3 · 转账建单</div>
-      <div class="progress-item muted">○ Day 4 · 授权执行</div>
-      <div class="side-note">本地银行模拟系统<br/>Day 3 仅创建待审批订单。没有真实资金流动和大模型调用。</div>
-    </aside>
-
-    <main class="main">
-      <header class="header">
-        <div><h1>银行智能助手</h1><p>查询模拟账户 · 创建待确认转账订单</p></div>
-        <span class="server-status" :class="status === '交互服务已连接' ? 'online' : 'offline'">● {{ status }}</span>
-      </header>
-
-      <div class="dev-auth">
-        <div class="dev-auth-title">本地开发登录凭证 <span>只保存在当前页面内存</span></div>
-        <div class="dev-auth-form">
-          <input type="password" v-model="authToken" autocomplete="off" placeholder="粘贴 Java 后端签发的测试 Bearer Token（不含 Bearer 前缀）" aria-label="测试登录凭证" />
-          <button v-if="bankMode === 'mock'" type="button" @click="authToken = 'mock-day3-token'">填入 Mock 测试令牌</button>
-          <span class="mode-pill">{{ bankMode === 'mock' ? 'Mock 数据 · 不连 MySQL' : 'Java 银行服务' }}</span>
-        </div>
-        <p>Day 3 调试专用：真实 Java 接口必须由 Spring Security 验证用户身份；禁止把 Token 存到浏览器持久化存储。</p>
-      </div>
-
-      <div class="content">
-        <div class="welcome-card"><div class="welcome-kicker">BankPilot / DAY 03</div><h2>今天想办理什么？</h2><p>你可以查询银行数据，也可以说“给李四转200元”，系统会生成一张待审批订单。</p>
-          <div class="shortcuts"><button v-for="shortcut in shortcuts" :key="shortcut.label" type="button" @click="send(shortcut.message)" :disabled="busy"><span>{{ shortcut.icon }}</span>{{ shortcut.label }}</button></div>
-        </div>
-
-        <div class="chat" aria-live="polite">
-          <div v-for="message in messages" :key="message.id" class="message" :class="message.role">
-            <div class="avatar">{{ message.role === 'assistant' ? 'B' : '我' }}</div>
-            <div class="message-body">
-              <div class="bubble">{{ message.content }}</div>
-              <div v-if="message.intent === 'balance' && message.data" class="data-panel balance-panel">
-                <div class="panel-subtitle">模拟账户余额</div>
-                <strong>{{ amount(message.data.balance) }}</strong>
-                <div class="subline">{{ message.data.userName || '当前用户' }} · {{ message.data.accountNoMasked || '****' }}</div>
-              </div>
-              <div v-if="message.intent === 'transactions' && Array.isArray(message.data)" class="data-panel">
-                <div class="panel-subtitle">最近交易（最多 100 条）</div>
-                <div v-if="!message.data.length" class="empty">暂无交易记录</div>
-                <div v-for="(t, index) in message.data" :key="t.id ?? index" class="list-row">
-                  <div><div class="row-title">{{ merchantOf(t) }}</div><div class="row-meta">{{ t.category || '其他' }} · {{ dateOf(t) }}</div></div>
-                  <strong :class="t.direction === 'IN' ? 'in' : 'out'">{{ t.direction === 'IN' ? '+' : '-' }}{{ amount(t.amount) }}</strong>
-                </div>
-              </div>
-              <div v-if="message.intent === 'payees' && Array.isArray(message.data)" class="data-panel">
-                <div class="panel-subtitle">常用收款人</div>
-                <div v-if="!message.data.length" class="empty">暂无常用收款人</div>
-                <div v-for="(p, index) in message.data" :key="p.id ?? index" class="list-row">
-                  <div class="row-title">{{ payeeOf(p) }}</div>
-                  <div class="row-meta">{{ payeeAccountOf(p) }}</div>
-                </div>
-              </div>
-              <div v-if="message.intent === 'subscriptions' && Array.isArray(message.data)" class="data-panel">
-                <div class="panel-subtitle">订阅代扣协议 · 仅查询</div>
-                <div v-if="!message.data.length" class="empty">暂无代扣协议</div>
-                <div v-for="(s, index) in message.data" :key="s.id ?? index" class="list-row">
-                  <div><div class="row-title">{{ merchantOf(s) }} <span class="small-status">{{ s.status === 'ACTIVE' ? '生效中' : '已取消' }}</span></div>
-                  <div class="row-meta">{{ cycleOf(s) }} · 下次扣费 {{ nextPayOf(s) }}</div></div>
-                  <strong>{{ amount(s.amount) }}</strong>
-                </div>
-              </div>
-              <TransferForm v-if="message.intent === 'transfer' && message.action === 'needs_input' && message.data"
-                :payees="message.data.payees" :payee-name="message.data.payeeName" :amount="message.data.amount"
-                :request-id="message.data.requestId" :busy="busy" :completed="completedRequests.includes(message.data.requestId)" @prepare="submitTransfer" />
-              <TransferOrderCard v-if="message.intent === 'transfer' && message.action === 'prepared' && message.data" :order="message.data" />
-              <div v-if="message.source === 'mock-api'" class="mock-warning">⚠ 本地 Mock 银行数据，未连接 Java/MySQL，不能作为真实转账验收。</div>
-              <div v-if="message.requestId" class="request-id">请求编号：{{ message.requestId }}</div>
-            </div>
-          </div>
-          <div v-if="busy" class="typing">正在调用银行接口…</div>
-          <div ref="endRef"></div>
-        </div>
-      </div>
-
-      <footer class="footer">
-        <form @submit.prevent="send()"><input v-model="input" :disabled="busy" maxlength="300" placeholder="例如：给李四转200元 / 我的余额是多少…" aria-label="输入银行业务需求"/><button :disabled="busy || !input.trim()" type="submit">发送 ↗</button></form>
-        <p>Day 3 仅规则识别与转账建单，尚未接入 LLM。所有账户均为模拟数据；请勿输入真实银行卡号、密码或短信验证码。</p>
-      </footer>
-    </main>
-  </div>
+<div class="layout">
+ <aside class="side"><div class="logo"><b>B</b><span>BankPilot<small>AI Banking Agent</small></span></div><div class="nav-title">开发里程碑</div><p>✓ Day 1 · 四层联通</p><p>✓ Day 2 · 银行查询</p><p>✓ Day 3 · 转账建单</p><p class="active">● Day 4 · 授权执行</p><div class="side-foot">比赛演示环境<br/>全部账户、金额与转账为模拟数据</div></aside>
+ <main>
+  <header><div><h1>银行智能助手</h1><span>自然语言转账 · 权限确认 · 强验证</span></div><span class="online" :class="connected?'ok':'bad'">● {{connected?'Agent 服务已连接':'Agent 服务未连接'}}</span></header>
+  <section class="dev-token"><div><strong>本地开发登录凭证</strong><span class="pill">{{mode==='mock'?'Mock：不连接 MySQL':'Java：真实接口联调'}}</span></div><div class="token-line"><input type="password" v-model="token" autocomplete="off" placeholder="填入 Java 登录 Token（不含 Bearer 前缀）"/><button v-if="mode==='mock'" @click="token='mock-day4-token'">填入 Mock 测试令牌</button></div><small>仅在当前页面内存保存，不要使用真实银行卡、密码或 OTP。Mock 令牌不具备真实认证能力。</small></section>
+  <section class="main-content">
+   <div class="intro"><span class="eyebrow">BANKPILOT · DAY 04</span><h2>你好，今天需要办理什么？</h2><p>支持银行查询、转账建单、用户授权、红色模拟验证码和模拟资金执行。</p><div class="chips"><button v-for="q in queries" :key="q" :disabled="busy" @click="send(q)">{{q}}</button></div></div>
+   <section class="chat" aria-live="polite">
+    <div v-for="m in messages" :key="m.id" class="msg" :class="m.role"><div class="avatar">{{m.role==='assistant'?'B':'我'}}</div><div class="msg-content"><div class="bubble">{{m.reply}}</div>
+      <div v-if="m.intent==='balance'&&m.data" class="panel balance"><small>模拟账户余额 · {{m.data.accountNoMasked}}</small><strong>{{money(m.data.balance)}}</strong></div>
+      <div v-if="m.intent==='transactions'&&Array.isArray(m.data)" class="panel"><h4>交易流水</h4><p v-if="!m.data.length">暂无流水</p><div v-for="t in m.data" :key="t.id" class="list-item"><div>{{merchant(t)}}<small>{{t.category}} · {{when(t)}}</small></div><strong>{{t.direction==='IN'?'+':'-'}}{{money(t.amount)}}</strong></div></div>
+      <div v-if="m.intent==='payees'&&Array.isArray(m.data)" class="panel"><h4>常用收款人</h4><p v-if="!m.data.length">暂无记录</p><div v-for="p in m.data" :key="p.id" class="list-item"><strong>{{p.payeeName}}</strong><span>{{p.payeeAccountMasked}}</span></div></div>
+      <div v-if="m.intent==='subscriptions'&&Array.isArray(m.data)" class="panel"><h4>订阅代扣</h4><p v-if="!m.data.length">暂无协议</p><div v-for="s in m.data" :key="s.id" class="list-item"><div>{{merchant(s)}}<small>{{s.status}} · {{s.billingCycle}}</small></div><strong>{{money(s.amount)}}</strong></div></div>
+      <TransferForm v-if="m.intent==='transfer'&&m.action==='needs_input'&&m.data" :payees="m.data.payees" :payee-name="m.data.payeeName" :amount="m.data.amount" :request-id="m.data.requestId" :busy="busy" :completed="completedForms.includes(m.data.requestId)" @prepare="prepare"/>
+      <TransferOrderCard v-if="m.intent==='transfer'&&m.data?.orderId" :order="m.data" :busy="busy" @authorize="d=>doAction('authorize',d.orderId,{confirmation:d.confirmation,otpCode:d.otpCode})" @execute="id=>doAction('execute',id)" @cancel="id=>doAction('cancel',id)" @refresh="refresh"/>
+      <div v-if="m.source==='mock-api'" class="mock-warning">⚠ 当前使用 Mock 假银行，仅用于前端演示，未执行真实数据库事务。</div>
+      <div v-if="m.requestId" class="req-id">请求 ID：{{m.requestId}}</div>
+    </div></div>
+    <p v-if="busy" class="thinking">正在调用银行服务…</p><div ref="lastRef"></div>
+   </section>
+  </section>
+  <footer><form @submit.prevent="send()"><input v-model="input" :disabled="busy" placeholder="例如：给李四转200元" maxlength="300" aria-label="输入银行指令"/><button type="submit" :disabled="busy||!input.trim()">发送 ↗</button></form><small>Day4：规则路由，无真实 LLM；所有操作遵循银行后端结果，禁止在聊天文本中直接执行转账。</small></footer>
+ </main>
+</div>
 </template>

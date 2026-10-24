@@ -1,39 +1,45 @@
-"""BankPilot Day 3: read tools plus safe transfer ORDER PREPARATION only.
+"""BankPilot Day 4 FastAPI gateway. No AI model gets payment execution tools.
 
-No execute/approve endpoints. No LLM yet; does not claim payments are done.
+Only explicit browser POST operations can call authorize/execute/cancel routes.
+The Java bank backend MUST re-check authentication and all business permissions.
 """
-from typing import Any
+from decimal import Decimal
 from uuid import uuid4
-from decimal import Decimal, InvalidOperation
+from typing import Any
 import logging
-
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
-
 from app.router import Intent, parse_intent
 from app.transfer_parser import parse_transfer, normalize_amount
-from app.banking_client import (
-    BankingServiceError, BANK_API_MODE,
-    get_balance, get_transactions, get_payees, get_subscriptions, prepare_transfer,
-)
+from app import banking_client as bank
 
-app = FastAPI(title="BankPilot Agent Gateway - Day 3", version="0.3.0")
-log = logging.getLogger("bankpilot.agent")
+app = FastAPI(title="BankPilot Agent Day 4", version="0.4.0")
+logger = logging.getLogger("bankpilot.gateway")
 
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=300)
-    requestId: str | None = Field(default=None, min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    requestId: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{8,64}$")
 
 
 class PrepareRequest(BaseModel):
     payeeId: int = Field(gt=0)
     amount: str = Field(min_length=1, max_length=20)
-    requestId: str = Field(min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    requestId: str = Field(pattern=r"^[A-Za-z0-9_-]{8,64}$")
     remark: str = Field(default="", max_length=80)
 
 
-class ChatResponse(BaseModel):
+class ApprovalRequest(BaseModel):
+    confirmation: bool
+    otpCode: str | None = Field(default=None, max_length=20)
+    requestId: str = Field(pattern=r"^[A-Za-z0-9_-]{8,64}$")
+
+
+class ActionRequest(BaseModel):
+    requestId: str = Field(pattern=r"^[A-Za-z0-9_-]{8,64}$")
+
+
+class Response(BaseModel):
     reply: str
     intent: Intent
     action: str | None = None
@@ -42,121 +48,116 @@ class ChatResponse(BaseModel):
     requestId: str
 
 
-def format_money(value: Any) -> str:
-    try:
-        return f"{Decimal(str(value)):,.2f}"
-    except (InvalidOperation, ValueError):
-        return "金额格式异常"
+def bank_source(): return "mock-api" if bank.BANK_MODE == "mock" else "bank-api"
 
 
-def source_name() -> str:
-    return "mock-api" if BANK_API_MODE == "mock" else "bank-api"
+def _fail(e: bank.BankError):
+    logger.warning("bank_call_rejected status=%s", e.status)
+    raise HTTPException(status_code=e.status, detail=str(e)) from e
 
 
-def safe_error(exc: BankingServiceError) -> HTTPException:
-    return HTTPException(status_code=exc.status_code, detail=str(exc))
-
-
-async def checked_payee(payee_id: int, authorization: str | None):
-    """Convenience cross-check only; Java MUST enforce ownership again."""
-    payees = await get_payees(authorization)
-    match = [p for p in payees if isinstance(p, dict) and p.get("id") == payee_id]
-    if not match:
-        raise HTTPException(status_code=400, detail="请选择当前用户常用收款人中的有效账户。")
-    return match[0]
+def _response(action, payload, reply, request_id):
+    return Response(reply=reply, intent="transfer", action=action, data=payload,
+                    source=bank_source(), requestId=request_id)
 
 
 @app.get("/health")
 @app.get("/api/agent/health")
 async def health():
-    return {"status": "ok", "service": "agent-gateway", "mode": "rules-day3-prepare-only", "bankMode": BANK_API_MODE}
+    return {"status": "ok", "mode": "rules-day4", "bankMode": bank.BANK_MODE}
 
 
-@app.post("/api/agent/transfers/prepare", response_model=ChatResponse)
-async def prepare(request: PrepareRequest, authorization: str | None = Header(default=None)):
-    request_id = request.requestId
-    try:
-        amount = normalize_amount(request.amount)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    try:
-        await checked_payee(request.payeeId, authorization)
-        order = await prepare_transfer(request.payeeId, amount, request_id, authorization, request.remark)
-    except BankingServiceError as exc:
-        raise safe_error(exc) from exc
-    log.info("request_id=%s intent=transfer action=prepared", request_id)
-    return ChatResponse(
-        reply="已创建待确认转账订单。请核对收款人和金额；尚未扣款或转账。",
-        intent="transfer", action="prepared", data=order, source=source_name(), requestId=request_id,
-    )
-
-
-@app.post("/api/agent/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, authorization: str | None = Header(default=None)):
-    request_id = request.requestId or uuid4().hex
-    intent = parse_intent(request.message)
-    log.info("request_id=%s intent=%s", request_id, intent)  # No raw user text or full account data.
-
+@app.post("/api/agent/chat", response_model=Response)
+async def chat(req: ChatRequest, authorization: str | None = Header(default=None)):
+    request_id = req.requestId or uuid4().hex
+    intent = parse_intent(req.message)
+    logger.info("chat_intent=%s request_id=%s", intent, request_id)
     if intent == "unsupported":
-        return ChatResponse(
-            reply="目前支持余额、交易、常用收款人、订阅查询，以及‘给李四转200元’创建待确认订单。不会跳过授权。",
-            intent=intent, requestId=request_id,
-        )
-
+        return Response(reply="目前支持查询余额、流水、收款人、代扣和单笔转账建单；复杂表达请补充后再提交。",
+                        intent=intent, requestId=request_id)
     try:
-        if intent == "transfer":
-            parsed = parse_transfer(request.message)
-            assert parsed is not None
-            payees = await get_payees(authorization)
-            matches = [p for p in payees if isinstance(p, dict) and p.get("payeeName") == parsed.payee_name]
-            try:
-                amt = normalize_amount(parsed.amount) if parsed.amount is not None else None
-                amount_error = None
-            except ValueError as exc:
-                amt, amount_error = None, str(exc)
-            if len(matches) != 1 or amt is None:
-                if not payees:
-                    info = "当前没有可用的常用收款人，请先在银行系统中添加。"
-                elif len(matches) > 1:
-                    info = "收款人重名，请从列表中明确选择正确账户。"
-                elif len(matches) == 0:
-                    info = f"未找到名为“{parsed.payee_name}”的常用收款人，请明确选择。"
-                else:
-                    info = "请输入需要转账的金额。"
-                if amount_error:
-                    info = amount_error
-                return ChatResponse(
-                    reply=f"{info}本阶段仅能创建待确认订单，不会扣款。",
-                    intent="transfer", action="needs_input",
-                    data={"payees": payees, "payeeName": parsed.payee_name, "amount": amt or "", "requestId": request_id},
-                    source=source_name(), requestId=request_id,
-                )
-            if not authorization:
-                # UI form can re-submit after user obtains a demo login token.
-                return ChatResponse(
-                    reply="已找到收款人和金额。创建订单前，需要先提供银行后端签发的测试登录凭证。",
-                    intent="transfer", action="needs_input",
-                    data={"payees": payees, "payeeName": parsed.payee_name, "amount": amt, "requestId": request_id},
-                    source=source_name(), requestId=request_id,
-                )
-            order = await prepare_transfer(matches[0]["id"], amt, request_id, authorization)
-            return ChatResponse(
-                reply="已创建待确认转账订单。尚未扣款，请查看下方订单预览。",
-                intent="transfer", action="prepared", data=order, source=source_name(), requestId=request_id,
-            )
         if intent == "balance":
-            data = await get_balance(authorization)
-            reply = f"{data.get('userName', '您好')}，您的模拟账户 {data.get('accountNoMasked', '****')} 当前余额为 ¥{format_money(data['balance'])}。"
-        elif intent == "transactions":
-            data = await get_transactions(authorization)
-            reply = f"从银行接口查询到 {len(data)} 条交易流水（最多 100 条），详见下方列表。"
-        elif intent == "payees":
-            data = await get_payees(authorization)
-            reply = f"当前共有 {len(data)} 位常用收款人，详见下方列表。"
-        else:
-            data = await get_subscriptions(authorization)
-            reply = f"查询到 {len(data)} 条代扣协议，本阶段仅支持查询。"
-    except BankingServiceError as exc:
-        log.warning("request_id=%s backend_status=%s", request_id, exc.status_code)
-        raise safe_error(exc) from exc
-    return ChatResponse(reply=reply, intent=intent, data=data, source=source_name(), requestId=request_id)
+            data = await bank.balance(authorization)
+            return Response(reply=f"模拟账户当前余额 ¥{Decimal(str(data['balance'])):,.2f}。", intent=intent, data=data,
+                            source=bank_source(), requestId=request_id)
+        if intent == "transactions":
+            data = await bank.transactions(authorization)
+            return Response(reply=f"已查询 {len(data)} 条交易记录。", intent=intent, data=data, source=bank_source(), requestId=request_id)
+        if intent == "payees":
+            data = await bank.payees(authorization)
+            return Response(reply=f"已查询 {len(data)} 位常用收款人。", intent=intent, data=data, source=bank_source(), requestId=request_id)
+        if intent == "subscriptions":
+            data = await bank.subscriptions(authorization)
+            return Response(reply=f"已查询 {len(data)} 条代扣协议。", intent=intent, data=data, source=bank_source(), requestId=request_id)
+
+        parsed = parse_transfer(req.message)
+        if parsed is None:
+            return Response(reply="无法确定收款人或金额。", intent="transfer", requestId=request_id)
+        saved_payees = await bank.payees(authorization)
+        matches = [p for p in saved_payees if p.get("payeeName") == parsed.payee_name]
+        try:
+            amount = normalize_amount(parsed.amount) if parsed.amount is not None else None
+        except ValueError:
+            amount = None
+        if len(matches) != 1 or amount is None or not authorization:
+            return _response("needs_input", {
+                "payees": saved_payees, "payeeName": parsed.payee_name, "amount": amount or "", "requestId": request_id,
+            }, "请确认收款人、填写有效金额，并提供银行登录凭证。仅提交转账建单请求。", request_id)
+        result = await bank.prepare_transfer(int(matches[0]["id"]), amount, request_id, authorization)
+        return _response("prepared", result, "待确认转账订单已创建；尚未发生扣款。", request_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=502, detail="银行查询返回数据格式有误。")
+    except bank.BankError as ex:
+        _fail(ex)
+
+
+@app.post("/api/agent/transfers/prepare", response_model=Response)
+async def prepare(req: PrepareRequest, authorization: str | None = Header(default=None)):
+    try:
+        amount = normalize_amount(req.amount)
+    except ValueError as ex:
+        raise HTTPException(status_code=422, detail=str(ex)) from ex
+    try:
+        saved_payees = await bank.payees(authorization)
+        if not any(p.get("id") == req.payeeId for p in saved_payees):
+            raise HTTPException(status_code=400, detail="请选择本人常用收款人列表中的有效账户。")
+        order = await bank.prepare_transfer(req.payeeId, amount, req.requestId, authorization, req.remark)
+        return _response("prepared", order, "待确认转账订单已创建；尚未发生扣款。", req.requestId)
+    except bank.BankError as ex: _fail(ex)
+
+
+@app.get("/api/agent/transfers/{order_id}", response_model=Response)
+async def status(order_id: str, authorization: str | None = Header(default=None)):
+    try:
+        order = await bank.get_order(order_id, authorization)
+        return _response("status", order, "已从银行服务读取最新订单状态。", uuid4().hex)
+    except bank.BankError as ex: _fail(ex)
+
+
+@app.post("/api/agent/transfers/{order_id}/authorize", response_model=Response)
+async def authorize(order_id: str, req: ApprovalRequest, authorization: str | None = Header(default=None)):
+    if req.confirmation is not True:
+        raise HTTPException(status_code=400, detail="必须由用户明确确认订单信息。")
+    try:
+        order = await bank.authorize_transfer(order_id, authorization, True, req.otpCode, req.requestId)
+        if order["status"] != "AUTHORIZED":
+            raise HTTPException(status_code=409, detail="授权尚未完成，请查询订单状态。")
+        return _response("authorized", order, "银行后端确认授权通过。尚未执行转账。", req.requestId)
+    except bank.BankError as ex: _fail(ex)
+
+
+@app.post("/api/agent/transfers/{order_id}/execute", response_model=Response)
+async def execute(order_id: str, req: ActionRequest, authorization: str | None = Header(default=None)):
+    try:
+        order = await bank.execute_transfer(order_id, authorization, req.requestId)
+        return _response("executed", order,
+                         "银行系统确认模拟转账成功。" if order["status"] == "SUCCESS" else "请查看银行订单状态。", req.requestId)
+    except bank.BankError as ex: _fail(ex)
+
+
+@app.post("/api/agent/transfers/{order_id}/cancel", response_model=Response)
+async def cancel(order_id: str, req: ActionRequest, authorization: str | None = Header(default=None)):
+    try:
+        order = await bank.cancel_transfer(order_id, authorization, req.requestId)
+        return _response("cancelled", order, "订单取消结果已从银行后端返回。", req.requestId)
+    except bank.BankError as ex: _fail(ex)

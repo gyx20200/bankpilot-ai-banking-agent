@@ -1,94 +1,116 @@
-"""HTTP client for known banking endpoints only; no model-generated URLs or SQL."""
+"""Strict whitelist of backend routes, no dynamic paths from model responses.
+
+Only the browser's user action may invoke authorize/execute/cancel endpoints.
+Java must independently authenticate, authorize, enforce idempotency/transactions.
+"""
 import os
+import re
 from typing import Any
 import httpx
 
-BANK_READ_API_BASE = os.getenv("BANK_API_BASE", "http://127.0.0.1:8080/api/demo").rstrip("/")
-BANK_TRANSFER_API_BASE = os.getenv("BANK_TRANSFER_API_BASE", "http://127.0.0.1:8080/api/transfers").rstrip("/")
-BANK_API_MODE = os.getenv("BANK_API_MODE", "java").lower()
+READ_URL = os.environ.get("BANK_API_BASE", "http://127.0.0.1:8080/api/demo").rstrip("/")
+TRANSFER_URL = os.environ.get("BANK_TRANSFER_API_BASE", "http://127.0.0.1:8080/api/transfers").rstrip("/")
+BANK_MODE = os.environ.get("BANK_API_MODE", "java").lower()
+ORDER_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
-class BankingServiceError(Exception):
-    def __init__(self, message: str, status_code: int = 502):
+class BankError(Exception):
+    def __init__(self, message: str, status: int = 502):
         super().__init__(message)
-        self.status_code = status_code
+        self.status = status
 
 
-def _headers(authorization: str | None) -> dict[str, str]:
-    if not authorization:
+def _headers(bearer: str | None) -> dict[str, str]:
+    if not bearer:
         return {}
-    if len(authorization) > 2048 or not authorization.startswith("Bearer ") or not authorization[7:].strip():
-        raise BankingServiceError("身份凭证格式无效。", 401)
-    return {"Authorization": authorization}
+    if len(bearer) > 2048 or not bearer.startswith("Bearer ") or not bearer[7:].strip():
+        raise BankError("登录凭证格式错误。", 401)
+    return {"Authorization": bearer}
 
 
-def _handle_error(exc: httpx.HTTPStatusError) -> BankingServiceError:
-    code = exc.response.status_code
-    messages = {
-        400: "业务参数错误，请核对订单内容。",
-        401: "请先登录并获取有效的银行登录凭证。",
-        403: "当前账户无权执行该操作。",
-        404: "收款人或业务资源不存在。",
-        409: "业务状态冲突或重复请求，请查询原订单状态。",
-        422: "银行接口拒绝了参数，请核对金额与收款人。",
-        429: "操作过于频繁，请稍后再试。",
-    }
-    return BankingServiceError(messages.get(code, "银行业务服务暂时不可用。"), code if code in messages else 502)
+def _oid(order_id: str) -> str:
+    if not ORDER_RE.fullmatch(str(order_id)):
+        raise BankError("订单编号格式错误。", 400)
+    return str(order_id)
 
 
-async def _call(method: str, url: str, authorization: str | None = None, payload: dict | None = None) -> Any:
+async def _request(method: str, url: str, bearer: str | None = None, data: dict | None = None) -> Any:
     try:
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
-            response = await client.request(method, url, headers=_headers(authorization), json=payload)
+        async with httpx.AsyncClient(timeout=8, follow_redirects=False) as client:
+            response = await client.request(method, url, headers=_headers(bearer), json=data)
             response.raise_for_status()
             return response.json()
-    except httpx.HTTPStatusError as exc:
-        raise _handle_error(exc) from exc
-    except (httpx.HTTPError, ValueError) as exc:
-        raise BankingServiceError("银行接口不可用或返回格式错误，请检查后端服务。") from exc
+    except httpx.HTTPStatusError as ex:
+        status = ex.response.status_code
+        mapping = {
+            400: "请求参数不正确。", 401: "登录状态无效，请重新登录。",
+            403: "授权失败、验证码错误或没有操作权限。", 404: "订单不存在。",
+            409: "订单状态冲突，请刷新订单状态后处理。",
+            422: "业务参数不满足要求。", 429: "操作太频繁，暂时无法继续。",
+        }
+        raise BankError(mapping.get(status, "银行业务服务异常。"), status if status in mapping else 502) from ex
+    except (httpx.HTTPError, ValueError) as ex:
+        raise BankError("无法确定银行接口的处理结果，请查询订单状态，勿立即重复执行。") from ex
 
 
-async def _get(path: str, authorization: str | None = None) -> Any:
-    return await _call("GET", f"{BANK_READ_API_BASE}/{path}", authorization)
-
-
-async def get_balance(authorization: str | None = None) -> dict[str, Any]:
-    value = await _get("balance", authorization)
-    if not isinstance(value, dict) or "balance" not in value:
-        raise BankingServiceError("余额接口数据结构不正确。")
+async def balance(bearer: str | None):
+    value = await _request("GET", f"{READ_URL}/balance", bearer)
+    if not isinstance(value, dict) or "balance" not in value: raise BankError("余额数据格式不正确。")
     return value
 
 
-async def get_transactions(authorization: str | None = None) -> list[dict[str, Any]]:
-    value = await _get("transactions", authorization)
-    if not isinstance(value, list):
-        raise BankingServiceError("交易接口数据结构不正确。")
+async def transactions(bearer: str | None):
+    value = await _request("GET", f"{READ_URL}/transactions", bearer)
+    if not isinstance(value, list): raise BankError("交易流水数据格式不正确。")
     return value
 
 
-async def get_payees(authorization: str | None = None) -> list[dict[str, Any]]:
-    value = await _get("payees", authorization)
-    if not isinstance(value, list):
-        raise BankingServiceError("收款人接口数据结构不正确。")
+async def payees(bearer: str | None):
+    value = await _request("GET", f"{READ_URL}/payees", bearer)
+    if not isinstance(value, list): raise BankError("收款人数据格式不正确。")
     return value
 
 
-async def get_subscriptions(authorization: str | None = None) -> list[dict[str, Any]]:
-    value = await _get("subscriptions", authorization)
-    if not isinstance(value, list):
-        raise BankingServiceError("订阅接口数据结构不正确。")
+async def subscriptions(bearer: str | None):
+    value = await _request("GET", f"{READ_URL}/subscriptions", bearer)
+    if not isinstance(value, list): raise BankError("代扣数据格式不正确。")
     return value
 
 
-async def prepare_transfer(payee_id: int, amount: str, request_id: str,
-                           authorization: str | None, remark: str = "") -> dict[str, Any]:
-    if not authorization:
-        raise BankingServiceError("请先取得后端登录令牌，才能创建待确认订单。", 401)
-    payload = {"payeeId": payee_id, "amount": amount, "requestId": request_id, "remark": remark}
-    value = await _call("POST", f"{BANK_TRANSFER_API_BASE}/prepare", authorization, payload)
-    required = ("orderId", "payeeName", "accountMasked", "amount", "riskLevel", "status")
-    if not isinstance(value, dict) or any(key not in value for key in required):
-        raise BankingServiceError("转账建单接口返回的数据格式不正确。")
-    if value["status"] != "PENDING_APPROVAL" or value["riskLevel"] not in ("YELLOW", "RED"):
-        raise BankingServiceError("银行返回的订单状态或风险级别异常，请人工核实。")
+def _validate_order(value):
+    if not isinstance(value, dict) or any(field not in value for field in ("orderId", "status", "amount", "riskLevel")):
+        raise BankError("银行订单返回数据格式不正确。")
     return value
+
+
+async def prepare_transfer(payee_id: int, amount: str, request_id: str, bearer: str | None, remark: str = ""):
+    if not bearer: raise BankError("请先登录后再创建订单。", 401)
+    order = await _request("POST", f"{TRANSFER_URL}/prepare", bearer,
+                           {"payeeId": payee_id, "amount": amount, "requestId": request_id, "remark": remark})
+    _validate_order(order)
+    if order["status"] != "PENDING_APPROVAL" or order["riskLevel"] not in ("YELLOW", "RED"):
+        raise BankError("建单状态异常，未报告成功。")
+    return order
+
+
+async def get_order(order_id: str, bearer: str | None):
+    if not bearer: raise BankError("请先登录。", 401)
+    return _validate_order(await _request("GET", f"{TRANSFER_URL}/{_oid(order_id)}", bearer))
+
+
+async def authorize_transfer(order_id: str, bearer: str | None, confirmation: bool, otp_code: str | None, request_id: str):
+    if not bearer: raise BankError("请先登录。", 401)
+    return _validate_order(await _request("POST", f"{TRANSFER_URL}/{_oid(order_id)}/authorize", bearer,
+                                          {"confirmation": confirmation, "otpCode": otp_code, "requestId": request_id}))
+
+
+async def execute_transfer(order_id: str, bearer: str | None, request_id: str):
+    if not bearer: raise BankError("请先登录。", 401)
+    return _validate_order(await _request("POST", f"{TRANSFER_URL}/{_oid(order_id)}/execute", bearer,
+                                          {"requestId": request_id}))
+
+
+async def cancel_transfer(order_id: str, bearer: str | None, request_id: str):
+    if not bearer: raise BankError("请先登录。", 401)
+    return _validate_order(await _request("POST", f"{TRANSFER_URL}/{_oid(order_id)}/cancel", bearer,
+                                          {"requestId": request_id}))
