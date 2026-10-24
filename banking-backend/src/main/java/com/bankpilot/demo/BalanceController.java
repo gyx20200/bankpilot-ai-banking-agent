@@ -32,7 +32,7 @@ public class BalanceController {
             rs.getString("display_name"),
             AccountMasker.mask(rs.getString("account_no")),
             rs.getBigDecimal("balance"), "CNY", "mysql"
-        ), DemoUser.ID);
+        ), AuthenticatedUser.id());
         if (result.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Demo account is missing");
         }
