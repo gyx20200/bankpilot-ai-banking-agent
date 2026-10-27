@@ -14,8 +14,30 @@ from app.transfer_parser import TransferIntent
 from app import llm_router
 from app.transfer_parser import parse_transfer, normalize_amount
 from app import banking_client as bank
+from app.workflow_api import router as workflow_router
 
-app = FastAPI(title="BankPilot Agent Day 5", version="0.5.0")
+app = FastAPI(title="BankPilot Agent Day 6", version="0.6.0")
+app.include_router(workflow_router)
+
+
+class DemoLoginRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=128)
+
+
+@app.post("/api/agent/auth/demo-login")
+async def demo_login(req: DemoLoginRequest):
+    try:
+        return await bank.demo_login(req.password)
+    except bank.BankError as exc:
+        _fail(exc)
+
+
+@app.post("/api/agent/transfers/{order_id}/otp/request")
+async def request_otp(order_id: str, authorization: str | None = Header(default=None)):
+    try:
+        return await bank.request_transfer_otp(order_id, authorization)
+    except bank.BankError as exc:
+        _fail(exc)
 logger = logging.getLogger("bankpilot.gateway")
 
 
