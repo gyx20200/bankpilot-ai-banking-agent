@@ -1,7 +1,7 @@
 <script setup>
 import {ref,watch} from 'vue'
 const props=defineProps({order:{type:Object,required:true},busy:{type:Boolean,default:false}})
-const emit=defineEmits(['authorize','execute','cancel','refresh'])
+const emit=defineEmits(['authorize','execute','cancel','refresh','otpRequest'])
 const confirmed=ref(false)
 const otp=ref('')
 const error=ref('')
@@ -31,6 +31,7 @@ const money=v=>new Intl.NumberFormat('zh-CN',{style:'currency',currency:'CNY'}).
    </dl>
    <div v-if="order.status==='PENDING_APPROVAL'" class="approval">
      <label class="check"><input type="checkbox" v-model="confirmed" :disabled="busy"/> 我已核对收款人、账号和金额，确认授权这笔模拟转账</label>
+     <div v-if="order.riskLevel==='RED'" class="otp-help"><button class="secondary" :disabled="busy" @click="emit('otpRequest',order.orderId)">向银行申请模拟验证码</button><small>Java 后端负责生成与校验。验证码不由模型生成。</small></div>
      <label v-if="order.riskLevel==='RED'" class="otp-label">模拟 OTP 验证码<input v-model="otp" type="password" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="请输入 6 位验证码" :disabled="busy"/></label>
      <p v-if="error" class="error">{{error}}</p>
      <div class="actions"><button class="primary" :disabled="busy||!confirmed" @click="approve">{{busy?'处理中…':order.riskLevel==='RED'?'强验证并授权':'确认并授权'}}</button><button class="secondary" :disabled="busy" @click="emit('cancel',order.orderId)">取消订单</button></div>

@@ -193,3 +193,33 @@ async def cancel_transfer(
     return order
 
 
+
+
+async def cancel_subscription(subscription_id: int, bearer: str, request_id: str):
+    """Future Java endpoint; currently 404 in uploaded backend, not a fake success."""
+    if not bearer:
+        raise BankError('请先登录。', 401)
+    if not isinstance(subscription_id, int) or subscription_id <= 0:
+        raise BankError('代扣协议 ID 无效。', 400)
+    base = os.getenv('BANK_SUBSCRIPTION_API_BASE', 'http://127.0.0.1:8080/api/subscriptions').rstrip('/')
+    return await _request('POST', f'{base}/{subscription_id}/cancel', bearer,
+                          {'requestId': request_id})
+
+
+async def demo_login(password: str):
+    """Local simulated bank login; forwards credentials only to Java, not LLM."""
+    url = os.getenv('BANK_AUTH_API_BASE', 'http://127.0.0.1:8080/api/auth').rstrip('/')
+    data = await _request('POST', f'{url}/demo-login', None,
+                          {'username': 'demo', 'password': password})
+    if not isinstance(data, dict) or not data.get('token'):
+        raise BankError('银行未返回有效的演示登录凭证。')
+    return data
+
+
+async def request_transfer_otp(order_id: str, bearer: str):
+    if not bearer:
+        raise BankError('请先登录。', 401)
+    result = await _request('POST', f'{TRANSFER_URL}/{_oid(order_id)}/otp/request', bearer)
+    if not isinstance(result, dict) or 'expiresInSeconds' not in result:
+        raise BankError('银行未返回有效的验证请求信息。')
+    return result
