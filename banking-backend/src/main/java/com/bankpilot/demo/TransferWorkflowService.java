@@ -1,0 +1,348 @@
+package com.bankpilot.demo;
+
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.HexFormat;
+import java.util.List;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.transaction.annotation.Transactional;
+import java.sql.Timestamp;
+/**
+ * All business state changes are DB-controlled. The LLM cannot approve or debit.
+ * ONLY use with fabricated demo accounts. Not a production banking implementation.
+ */
+@Service
+public class TransferWorkflowService {
+    private static final ZoneId ZONE = ZoneId.of("Asia/Shanghai");
+    private static final BigDecimal THRESHOLD = new BigDecimal("1000.00");
+    private static final int OTP_MAX_TRIES = 5;
+    private final JdbcTemplate jdbc;
+    private final DemoOtpVault otpVault;
+    private final SecureRandom random = new SecureRandom();
+
+    public TransferWorkflowService(JdbcTemplate jdbc, DemoOtpVault otpVault) {
+        this.jdbc = jdbc;
+        this.otpVault = otpVault;
+    }
+
+    public record StatusView(long orderId, String payeeName, String accountMasked,
+                             BigDecimal amount, String riskLevel, String status, String message) { }
+    public record ApprovalView(long orderId, String riskLevel, String status,
+                               String result, int remainingAttempts) { }
+    public record OtpView(long orderId, String result, int expiresInSeconds) { }
+    record Order(long id, long senderId, long receiverId, BigDecimal amount,
+                 String risk, String status, LocalDateTime createdAt) { }
+    record Account(long id, BigDecimal balance, String status) { }
+    record Challenge(long id, String method, String status, String salt, String hash,
+                     int failedAttempts, LocalDateTime expiresAt) { }
+
+    private static LocalDateTime now() { return LocalDateTime.now(ZONE); }
+
+    private void lockUser(long userId) {
+        var ids = jdbc.query("SELECT id FROM users WHERE id=? FOR UPDATE", (rs,i)->rs.getLong(1), userId);
+        if (ids.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found");
+    }
+
+    private Order loadOrder(long userId, long orderId, boolean lock) {
+        String sql = """
+            SELECT id,sender_account_id,receiver_account_id,amount,risk_level,status,created_at
+            FROM transfer_orders WHERE id=? AND user_id=?
+            """ + (lock ? " FOR UPDATE" : "");
+        var matches = jdbc.query(sql, (rs,i)->new Order(rs.getLong("id"), rs.getLong("sender_account_id"),
+            rs.getLong("receiver_account_id"), rs.getBigDecimal("amount"), rs.getString("risk_level"),
+            rs.getString("status"), rs.getTimestamp("created_at").toLocalDateTime()), orderId, userId);
+        if (matches.isEmpty()) throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Order not found");
+        return matches.get(0);
+    }
+
+    private Challenge loadChallenge(long orderId) {
+        var rows = jdbc.query("""
+            SELECT id,auth_method,approval_status,otp_salt,otp_hash,failed_attempts,expires_at
+            FROM approval_records WHERE order_id=? FOR UPDATE
+            """, (rs,i)->new Challenge(rs.getLong("id"), rs.getString("auth_method"),
+            rs.getString("approval_status"), rs.getString("otp_salt"), rs.getString("otp_hash"),
+            rs.getInt("failed_attempts"), rs.getTimestamp("expires_at") == null ? null :
+                rs.getTimestamp("expires_at").toLocalDateTime()), orderId);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    private boolean expired(Challenge c) {
+        return c == null || c.expiresAt() == null || !c.expiresAt().isAfter(now());
+    }
+
+    private void audit(long userId, long orderId, String action, String result) {
+        jdbc.update("INSERT INTO audit_events(user_id,order_id,action,result,created_at) VALUES (?,?,?,?,?)",
+            userId, orderId, action, result, Timestamp.valueOf(now()));
+    }
+
+    private BigDecimal cumulativeIncluding(Order order, long userId) {
+        LocalDate day = LocalDate.now(ZONE);
+        BigDecimal others = jdbc.queryForObject("""
+            SELECT COALESCE(SUM(amount),0) FROM transfer_orders
+            WHERE user_id=? AND id<>? AND created_at>=? AND created_at<?
+              AND status IN ('PENDING_APPROVAL','AUTHORIZED','EXECUTING','SUCCESS','UNKNOWN')
+            """, BigDecimal.class, userId, order.id(), Timestamp.valueOf(day.atStartOfDay()),
+            Timestamp.valueOf(day.plusDays(1).atStartOfDay()));
+        return (others == null ? BigDecimal.ZERO : others).add(order.amount());
+    }
+
+    private boolean upgradeRiskIfNeeded(Order order, long userId) {
+        if ("YELLOW".equals(order.risk()) && cumulativeIncluding(order,userId).compareTo(THRESHOLD)>0) {
+            jdbc.update("UPDATE transfer_orders SET risk_level='RED',status='PENDING_APPROVAL',updated_at=? WHERE id=?",
+                Timestamp.valueOf(now()),order.id());
+            jdbc.update("UPDATE approval_records SET approval_status='EXPIRED' WHERE order_id=?",order.id());
+            otpVault.clear(order.id());
+            audit(userId,order.id(),"RISK_RECHECK","UPGRADED_TO_RED");
+            return true;
+        }
+        return false;
+    }
+
+    @Transactional(readOnly = true)
+    public StatusView status(long userId, long orderId) {
+        loadOrder(userId,orderId,false); // verifies ownership before joining payee details
+        var rows = jdbc.query("""
+            SELECT o.id,o.amount,o.risk_level,o.status,p.payee_name,a.account_no
+            FROM transfer_orders o JOIN payees p ON p.id=o.payee_id
+            JOIN accounts a ON a.id=o.receiver_account_id
+            WHERE o.id=? AND o.user_id=?
+            """, (rs,i)->new StatusView(rs.getLong("id"),rs.getString("payee_name"),
+            AccountMasker.mask(rs.getString("account_no")),rs.getBigDecimal("amount"),
+            rs.getString("risk_level"),rs.getString("status"),null),orderId,userId);
+        return rows.get(0);
+    }
+
+    @Transactional
+    public OtpView requestOtp(long userId, long orderId) {
+        lockUser(userId);
+        Order order = loadOrder(userId,orderId,true);
+        if (!"PENDING_APPROVAL".equals(order.status())) conflict("Order is not pending approval");
+        if (!"RED".equals(order.risk()) && !upgradeRiskIfNeeded(order,userId)) {
+            conflict("OTP is only available for RED orders");
+        }
+        Challenge existing = loadChallenge(orderId);
+        if (existing != null && "PENDING".equals(existing.status()) && !expired(existing)) {
+            return new OtpView(orderId,"ALREADY_ISSUED",120);
+        }
+        if (existing != null && existing.failedAttempts() >= OTP_MAX_TRIES) conflict("Order security locked");
+        String code = otpVault.generate();
+        byte[] salt = new byte[16]; random.nextBytes(salt);
+        String saltText = HexFormat.of().formatHex(salt);
+        String hashText = hash(saltText, code);
+        LocalDateTime expiry = now().plusMinutes(2);
+        if (existing == null) {
+            jdbc.update("""
+                INSERT INTO approval_records(order_id,user_id,auth_method,approval_status,
+                    created_at,expires_at,otp_salt,otp_hash,failed_attempts)
+                VALUES (?,?,'DEMO_OTP','PENDING',?,?,?,?,0)
+                """,orderId,userId,Timestamp.valueOf(now()),Timestamp.valueOf(expiry),saltText,hashText);
+        } else {
+            jdbc.update("""
+                UPDATE approval_records SET auth_method='DEMO_OTP',approval_status='PENDING',
+                  created_at=?,expires_at=?,otp_salt=?,otp_hash=?,
+                  authorized_at=NULL WHERE id=?
+                """,Timestamp.valueOf(now()),Timestamp.valueOf(expiry),saltText,hashText,existing.id());
+        }
+        otpVault.store(orderId,userId,code,Instant.now().plusSeconds(120));
+        audit(userId,orderId,"OTP_REQUEST","CHALLENGE_CREATED");
+        return new OtpView(orderId,"OTP_ISSUED",120);
+    }
+
+    @Transactional
+    public ApprovalView authorize(long userId, long orderId, boolean confirmed, String otp) {
+        lockUser(userId);
+        Order order = loadOrder(userId,orderId,true);
+        if (!"PENDING_APPROVAL".equals(order.status())) conflict("Order is not awaiting confirmation");
+        if (!confirmed) {
+            jdbc.update("UPDATE transfer_orders SET status='CANCELLED',updated_at=? WHERE id=?",
+                Timestamp.valueOf(now()),orderId);
+            jdbc.update("UPDATE approval_records SET approval_status='REJECTED' WHERE order_id=?",orderId);
+            otpVault.clear(orderId);
+            audit(userId,orderId,"USER_DECISION","CANCELLED");
+            return new ApprovalView(orderId,order.risk(),"CANCELLED","USER_CANCELLED",0);
+        }
+        if (upgradeRiskIfNeeded(order,userId)) {
+            return new ApprovalView(orderId,"RED","PENDING_APPROVAL","RISK_UPGRADED_OTP_REQUIRED",OTP_MAX_TRIES);
+        }
+        if ("YELLOW".equals(order.risk())) {
+            Challenge existing = loadChallenge(orderId);
+            if (existing == null) {
+                jdbc.update("""
+                    INSERT INTO approval_records(order_id,user_id,auth_method,approval_status,
+                        created_at,expires_at,authorized_at)
+                    VALUES (?,?,'CONFIRM','APPROVED',?,?,?)
+                    """,orderId,userId,Timestamp.valueOf(now()),Timestamp.valueOf(now().plusMinutes(5)),Timestamp.valueOf(now()));
+            } else {
+                conflict("Unexpected challenge exists for YELLOW order");
+            }
+        } else if ("RED".equals(order.risk())) {
+            Challenge c = loadChallenge(orderId);
+            if (c == null || !"PENDING".equals(c.status()) || expired(c)) {
+                return new ApprovalView(orderId,"RED","PENDING_APPROVAL","OTP_REQUIRED_OR_EXPIRED",0);
+            }
+            // Never log, echo or persist a plaintext OTP.
+            if (otp == null || !otp.matches("[0-9]{6}") ||
+                    !MessageDigest.isEqual(hash(c.salt(),otp).getBytes(StandardCharsets.US_ASCII),
+                        c.hash().getBytes(StandardCharsets.US_ASCII))) {
+                int failures = c.failedAttempts()+1;
+                boolean locked = failures >= OTP_MAX_TRIES;
+                jdbc.update("UPDATE approval_records SET failed_attempts=?,approval_status=? WHERE id=?",
+                    failures,locked?"REJECTED":"PENDING",c.id());
+                if (locked) {
+                    jdbc.update("UPDATE transfer_orders SET status='CANCELLED',updated_at=? WHERE id=?",
+                        Timestamp.valueOf(now()),orderId);
+                    otpVault.clear(orderId);
+                }
+                audit(userId,orderId,"OTP_VERIFY",locked?"SECURITY_LOCKED":"REJECTED");
+                return new ApprovalView(orderId,"RED",locked?"CANCELLED":"PENDING_APPROVAL",
+                    locked?"TOO_MANY_FAILURES":"INVALID_OTP",Math.max(0,OTP_MAX_TRIES-failures));
+            }
+            jdbc.update("""
+                UPDATE approval_records SET approval_status='APPROVED',otp_hash=NULL,otp_salt=NULL,
+                    authorized_at=?,expires_at=? WHERE id=?
+                """,Timestamp.valueOf(now()),Timestamp.valueOf(now().plusMinutes(5)),c.id());
+            otpVault.clear(orderId);
+        } else {
+            conflict("Unknown risk level");
+        }
+        jdbc.update("UPDATE transfer_orders SET status='AUTHORIZED',updated_at=? WHERE id=?",
+            Timestamp.valueOf(now()),orderId);
+        audit(userId,orderId,"USER_DECISION","AUTHORIZED");
+        return new ApprovalView(orderId,order.risk(),"AUTHORIZED","AUTHORIZED",0);
+    }
+
+    @Transactional
+    public StatusView execute(long userId, long orderId) {
+        lockUser(userId);
+        Order order = loadOrder(userId,orderId,true);
+        if ("SUCCESS".equals(order.status())) return status(userId,orderId); // idem: zero extra debits
+        if (!"AUTHORIZED".equals(order.status())) conflict("Order not authorized for execution");
+        if (upgradeRiskIfNeeded(order,userId)) return status(userId,orderId);
+        Challenge approval = loadChallenge(orderId);
+        if (approval == null || !"APPROVED".equals(approval.status()) || expired(approval) ||
+            ("RED".equals(order.risk()) && !"DEMO_OTP".equals(approval.method()))) {
+            jdbc.update("UPDATE transfer_orders SET status='PENDING_APPROVAL',updated_at=? WHERE id=?",
+                Timestamp.valueOf(now()),orderId);
+            jdbc.update("UPDATE approval_records SET approval_status='EXPIRED' WHERE order_id=?",orderId);
+            audit(userId,orderId,"APPROVAL_CHECK","EXPIRED_OR_MISSING");
+            return status(userId,orderId);
+        }
+        // Lock accounts in a stable order to prevent deadlocks for opposite-direction transfers.
+        List<Account> accounts = jdbc.query("""
+            SELECT id,balance,status FROM accounts
+            WHERE id IN (?,?) ORDER BY id FOR UPDATE
+            """, (rs,i)->new Account(rs.getLong("id"),rs.getBigDecimal("balance"),rs.getString("status")),
+            order.senderId(),order.receiverId());
+        if (accounts.size() != 2) throw new IllegalStateException("Expected exactly two bank accounts");
+        Account sender = accounts.stream().filter(a->a.id()==order.senderId()).findFirst().orElseThrow();
+        Account receiver = accounts.stream().filter(a->a.id()==order.receiverId()).findFirst().orElseThrow();
+        if (sender.id()==receiver.id() || !"ACTIVE".equals(sender.status()) ||
+            !"ACTIVE".equals(receiver.status()) || sender.balance().compareTo(order.amount())<0) {
+            jdbc.update("UPDATE transfer_orders SET status='FAILED',updated_at=? WHERE id=?",
+                Timestamp.valueOf(now()),orderId);
+            audit(userId,orderId,"TRANSFER_EXECUTE","DECLINED");
+            return status(userId,orderId);
+        }
+        int debit = jdbc.update("UPDATE accounts SET balance=balance-? WHERE id=? AND balance>=? AND status='ACTIVE'",
+            order.amount(),order.senderId(),order.amount());
+        int credit = jdbc.update("UPDATE accounts SET balance=balance+? WHERE id=? AND status='ACTIVE'",
+            order.amount(),order.receiverId());
+        if (debit!=1 || credit!=1) throw new IllegalStateException("Atomic account update failed, transaction rolled back");
+        LocalDateTime timestamp = now();
+        jdbc.update("""
+            INSERT INTO transactions(account_id,direction,amount,category,merchant_name,description,occurred_at,transfer_order_id)
+            VALUES (?,'OUT',?,'转账','BankPilot模拟银行','模拟转账付款',?,?)
+            """,order.senderId(),order.amount(),Timestamp.valueOf(timestamp),orderId);
+        jdbc.update("""
+            INSERT INTO transactions(account_id,direction,amount,category,merchant_name,description,occurred_at,transfer_order_id)
+            VALUES (?,'IN',?,'转账','BankPilot模拟银行','模拟转账收款',?,?)
+            """,order.receiverId(),order.amount(),Timestamp.valueOf(timestamp),orderId);
+        int updated = jdbc.update("UPDATE transfer_orders SET status='SUCCESS',updated_at=? WHERE id=? AND status='AUTHORIZED'",
+            Timestamp.valueOf(timestamp),orderId);
+        if (updated!=1) throw new IllegalStateException("Order transition failed; transaction rolled back");
+        audit(userId,orderId,"TRANSFER_EXECUTE","SUCCESS");
+        return status(userId,orderId);
+    }
+
+    
+@Transactional
+public StatusView cancel(long userId, long orderId) {
+
+    // 与执行转账使用同一加锁顺序
+    lockUser(userId);
+    Order order = loadOrder(userId, orderId, true);
+
+    // 已取消：幂等返回
+    if ("CANCELLED".equals(order.status())) {
+        return status(userId, orderId);
+    }
+
+    // 仅允许取消待确认或已授权未执行的订单
+    if (!"PENDING_APPROVAL".equals(order.status())
+            && !"AUTHORIZED".equals(order.status())) {
+        conflict("Order cannot be cancelled");
+    }
+
+    // 条件更新，避免与执行转账竞争
+    int updated = jdbc.update("""
+        UPDATE transfer_orders
+        SET status = 'CANCELLED',
+            updated_at = ?
+        WHERE id = ?
+          AND user_id = ?
+          AND status IN ('PENDING_APPROVAL', 'AUTHORIZED')
+        """,
+        Timestamp.valueOf(now()),
+        orderId,
+        userId
+    );
+
+    if (updated != 1) {
+        conflict("Order state changed");
+    }
+
+    // 撤销尚有效的授权记录
+    jdbc.update("""
+        UPDATE approval_records
+        SET approval_status = 'REJECTED',
+            otp_hash = NULL,
+            otp_salt = NULL,
+            expires_at = ?
+        WHERE order_id = ?
+          AND user_id = ?
+          AND approval_status IN ('PENDING', 'APPROVED')
+        """,
+        Timestamp.valueOf(now()),
+        orderId,
+        userId
+    );
+
+    otpVault.clear(orderId);
+
+    audit(userId, orderId, "USER_DECISION", "CANCELLED");
+
+    return status(userId, orderId);
+}
+
+
+
+    private static String hash(String salt, String code) {
+        try {
+            MessageDigest sha=MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(sha.digest((salt+":"+code).getBytes(StandardCharsets.US_ASCII)));
+        } catch (NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
+    }
+    private static void conflict(String message) { throw new ResponseStatusException(HttpStatus.CONFLICT,message); }
+}

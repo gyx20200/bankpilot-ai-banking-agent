@@ -98,10 +98,52 @@ async def get_order(order_id: str, bearer: str | None):
     return _validate_order(await _request("GET", f"{TRANSFER_URL}/{_oid(order_id)}", bearer))
 
 
-async def authorize_transfer(order_id: str, bearer: str | None, confirmation: bool, otp_code: str | None, request_id: str):
-    if not bearer: raise BankError("请先登录。", 401)
-    return _validate_order(await _request("POST", f"{TRANSFER_URL}/{_oid(order_id)}/authorize", bearer,
-                                          {"confirmation": confirmation, "otpCode": otp_code, "requestId": request_id}))
+
+async def authorize_transfer(
+    order_id: str,
+    bearer: str | None,
+    confirmation: bool,
+    otp_code: str | None,
+    request_id: str
+):
+    if not bearer:
+        raise BankError("请先登录。", 401)
+
+    # 1. 调用 Java 的授权接口
+    approval = await _request(
+        "POST",
+        f"{TRANSFER_URL}/{_oid(order_id)}/authorize",
+        bearer,
+        {
+            "confirmed": confirmation,
+            "otp": otp_code
+        }
+    )
+
+    # 2. 校验授权响应，而非使用订单响应校验器
+    if (
+        not isinstance(approval, dict)
+        or any(
+            key not in approval
+            for key in ("orderId", "riskLevel", "status", "result")
+        )
+        or str(approval["orderId"]) != str(order_id)
+    ):
+        raise BankError(
+            "银行授权返回数据格式不正确，请刷新订单状态。"
+        )
+
+    # 3. 查询最新订单状态，获取完整订单字段
+    order = await get_order(order_id, bearer)
+
+    # 4. 保留授权结果，供 Agent 判断后续动作
+    order["result"] = approval["result"]
+    order["remainingAttempts"] = approval.get(
+        "remainingAttempts", 0
+    )
+
+    return order
+
 
 
 async def execute_transfer(order_id: str, bearer: str | None, request_id: str):
@@ -110,7 +152,44 @@ async def execute_transfer(order_id: str, bearer: str | None, request_id: str):
                                           {"requestId": request_id}))
 
 
-async def cancel_transfer(order_id: str, bearer: str | None, request_id: str):
-    if not bearer: raise BankError("请先登录。", 401)
-    return _validate_order(await _request("POST", f"{TRANSFER_URL}/{_oid(order_id)}/cancel", bearer,
-                                          {"requestId": request_id}))
+
+
+async def cancel_transfer(
+    order_id: str,
+    bearer: str | None,
+    request_id: str
+):
+    if not bearer:
+        raise BankError("请先登录。", 401)
+
+    oid = _oid(order_id)
+
+    current = await get_order(oid, bearer)
+
+    if current["status"] not in (
+        "PENDING_APPROVAL",
+        "AUTHORIZED",
+        "CANCELLED"
+    ):
+        raise BankError(
+            "订单已经执行或不允许取消。",
+            409
+        )
+
+    # Java 负责真正的取消、并发控制和审计
+    result = await _request(
+        "POST",
+        f"{TRANSFER_URL}/{oid}/cancel",
+        bearer
+    )
+
+    order = _validate_order(result)
+
+    if order["status"] != "CANCELLED":
+        raise BankError(
+            "取消结果尚未确认，请刷新订单状态。"
+        )
+
+    return order
+
+
