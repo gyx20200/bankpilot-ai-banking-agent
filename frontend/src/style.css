@@ -4,3 +4,19 @@
 .mode-indicators{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .pill.llm-label{color:#1b6c55;background:#e8f7ef}
 .routing-label{font-size:11px;margin-top:6px;color:#7186a0}
+
+/* Day6 cross-scenario workflow */
+.workflow-entry{background:#fff;border:1px solid #dce6f2;border-radius:12px;padding:16px;margin-bottom:20px}
+.workflow-entry label{display:block;margin-bottom:8px;font-size:13px;font-weight:650}
+.workflow-entry small{display:block;margin-top:8px;font-size:11px;color:#6b7e95}
+.workflow-entry .token-line button{background:#2565b5;color:white;font-weight:600}
+.cross-panel{width:min(560px,100%)}.cross-panel h4{margin:10px 0}
+.workflow-steps{display:flex;gap:7px;flex-wrap:wrap;margin:8px 0 15px}
+.workflow-steps span{background:#eaf3ff;padding:6px 9px;border-radius:7px;color:#27669c;font-size:11px}
+.cross-total{font-size:20px;font-weight:750;color:#174772}.cross-report p{color:#7c8998;font-size:12px}
+.cross-row{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid #e9eef5;font-size:13px}
+.cross-approval{background:#fff7e8;padding:14px;border-radius:10px;margin-top:14px}
+.cross-approval p,.workflow-note{font-size:12px;color:#5e738a;line-height:1.7}
+
+.otp-help{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:10px 0}
+.otp-help small{color:#71839a;font-size:11px}

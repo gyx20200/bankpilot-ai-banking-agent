@@ -7,8 +7,13 @@ client=TestClient(main.app)
 ORDER={'orderId':'MOCK-1001','amount':'200.00','riskLevel':'YELLOW','status':'PENDING_APPROVAL','payeeName':'李四','accountMasked':'****5291'}
 
 
-def test_health():
-    assert client.get('/health').json()['mode'] == 'rules-day5'
+def test_health(monkeypatch):
+    monkeypatch.setenv("MODEL_MODE", "rules")
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "rules-day5"
 
 
 def test_unknown_chat_cannot_execute():
