@@ -4,6 +4,7 @@ FIXED PUBLIC TEST TOKEN + OTP; NEVER DEPLOY. Does NOT authenticate real humans.
 Balances and orders live only in process RAM and reset upon restart.
 """
 from datetime import date, datetime, timezone
+import re
 from decimal import Decimal, InvalidOperation
 from threading import Lock
 from fastapi import FastAPI, HTTPException, Header
@@ -110,6 +111,60 @@ def subscriptions():
         {"id": 1, "merchantName": "视频会员", "amount": "25.00", "billingCycle": "MONTHLY", "status": "ACTIVE", "nextPayDate": "2026-11-08"},
         {"id": 2, "merchantName": "音乐会员", "amount": "15.00", "billingCycle": "MONTHLY", "status": "ACTIVE", "nextPayDate": "2026-11-12"},
     ]
+
+
+@app.get("/api/demo/analytics/monthly")
+def monthly_analytics(month: str, authorization: str | None = Header(default=None)):
+    """Mock of Java's monthly report, derived from the in-memory transaction history.
+
+    Demo-only: uses the public fake token. No Java/MySQL service is required.
+    """
+    _auth(authorization)
+    if not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", month):
+        raise HTTPException(400, "month must be YYYY-MM")
+    try:
+        date.fromisoformat(month + "-01")
+    except ValueError as ex:
+        raise HTTPException(400, "invalid month") from ex
+
+    with _lock:
+        rows = [dict(item) for item in _history]
+
+    income = Decimal("0.00")
+    expense = Decimal("0.00")
+    expenses_by_category = {}
+    for item in rows:
+        occurred = str(item.get("occurredAt", ""))
+        # ISO timestamps in the mock use YYYY-MM-DD prefixes, with or without TZ.
+        if occurred[:7] != month:
+            continue
+        amount = Decimal(str(item["amount"]))
+        direction = item.get("direction")
+        if direction == "IN":
+            income += amount
+        elif direction == "OUT":
+            expense += amount
+            name = str(item.get("category") or "未分类")
+            previous_amount, previous_count = expenses_by_category.get(
+                name, (Decimal("0.00"), 0)
+            )
+            expenses_by_category[name] = (previous_amount + amount, previous_count + 1)
+
+    def money(value: Decimal) -> str:
+        return f"{value:.2f}"
+
+    return {
+        "month": month,
+        "currency": "CNY",
+        "totalIncome": money(income),
+        "totalExpense": money(expense),
+        "netCashFlow": money(income - expense),
+        "categories": [
+            {"name": name, "amount": money(amount), "count": count}
+            for name, (amount, count) in sorted(expenses_by_category.items())
+        ],
+        "source": "mock",
+    }
 
 
 @app.post("/api/transfers/prepare")
