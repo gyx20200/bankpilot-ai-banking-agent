@@ -46,11 +46,16 @@ public class TransferWorkflowController {
         return workflow.execute(AuthenticatedUser.id(),orderId);
     }
 
-
     @PostMapping("/{orderId}/cancel")
-    public TransferWorkflowService.StatusView cancel(@PathVariable long orderId) {
-        return workflow.cancel(AuthenticatedUser.id(), orderId);
+    public TransferWorkflowService.StatusView cancel(
+            @PathVariable long orderId) {
+
+        return workflow.cancel(
+                AuthenticatedUser.id(),
+                orderId
+        );
     }
+
 
     /** Exposes FAKE OTP to the SAME local browser solely for contest demonstration.
      * Always disabled unless explicitly enabled AND called from loopback.

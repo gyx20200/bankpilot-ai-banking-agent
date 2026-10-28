@@ -10,9 +10,9 @@
   </parent>
   <groupId>com.bankpilot</groupId>
   <artifactId>banking-backend</artifactId>
-  <version>0.0.4-SNAPSHOT</version>
+  <version>0.0.5-SNAPSHOT</version>
   <name>banking-backend</name>
-  <description>BankPilot Day4 local demo with human authorization and atomic transfers</description>
+  <description>BankPilot Day5 LLM-tool-ready banking APIs, analytics and invocation audit</description>
   <properties>
     <java.version>21</java.version>
   </properties>

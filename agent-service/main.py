@@ -3,13 +3,13 @@
 Only explicit browser POST operations can call authorize/execute/cancel routes.
 The Java bank backend MUST re-check authentication and all business permissions.
 """
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 from typing import Any
 import logging
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
-from app.router import Intent, parse_intent
+from app.router import Intent, parse_intent, extract_month
 from app.transfer_parser import TransferIntent
 from app import llm_router
 from app.transfer_parser import parse_transfer, normalize_amount
@@ -82,23 +82,29 @@ async def chat(req: ChatRequest, authorization: str | None = Header(default=None
         return Response(reply="无法跳过银行权限控制；操作未执行。", intent="unsupported", requestId=request_id)
     routing = "llm" if llm_router.enabled() else "rules"
     parsed = None
+    monthly_month = None
     if llm_router.enabled():
         try:
             decision = await llm_router.choose_tool(req.message)
         except llm_router.LLMRouterError as ex:
             raise HTTPException(status_code=502, detail=str(ex)) from ex
-        selected = {"get_balance":"balance", "get_transactions":"transactions", "get_payees":"payees",
-                    "get_subscriptions":"subscriptions", "prepare_transfer":"transfer"}
+        selected = {"get_balance": "balance", "get_transactions": "transactions",
+                    "get_payees": "payees", "get_subscriptions": "subscriptions",
+                    "get_monthly_analytics": "monthly_analytics", "prepare_transfer": "transfer"}
         intent = selected.get(decision.name, "unsupported") if decision else "unsupported"
         if intent == "transfer":
             parsed = TransferIntent(payee_name=decision.arguments["payee_name"], amount=decision.arguments["amount"])
+        elif intent == "monthly_analytics":
+            monthly_month = decision.arguments["month"]
     else:
         intent = parse_intent(req.message)
         if intent == "transfer":
             parsed = parse_transfer(req.message)
+        elif intent == "monthly_analytics":
+            monthly_month = extract_month(req.message)
     logger.info("chat_intent=%s routing=%s request_id=%s", intent, routing, request_id)
     if intent == "unsupported":
-        return Response(reply="目前支持查询余额、流水、收款人、代扣和单笔转账建单；复杂表达或未经授权的操作无法执行。",
+        return Response(reply="目前支持余额、流水、收款人、代扣、月度收支分析和转账建单；未经授权的操作无法执行。",
                         intent=intent, requestId=request_id, routing=routing)
     try:
         if intent == "balance":
@@ -113,7 +119,21 @@ async def chat(req: ChatRequest, authorization: str | None = Header(default=None
             return Response(reply=f"已查询 {len(data)} 位常用收款人。", intent=intent, data=data, source=bank_source(), requestId=request_id, routing=routing)
         if intent == "subscriptions":
             data = await bank.subscriptions(authorization)
-            return Response(reply=f"已查询 {len(data)} 条代扣协议。", intent=intent, data=data, source=bank_source(), requestId=request_id)
+            return Response(reply=f"已查询 {len(data)} 条代扣协议。", intent=intent, data=data,
+                            source=bank_source(), requestId=request_id, routing=routing)
+        if intent == "monthly_analytics":
+            if monthly_month is None:
+                return Response(reply="请提供明确的统计月份，例如 2026 年 10 月。", intent=intent,
+                                requestId=request_id, routing=routing)
+            data = await bank.get_monthly_analytics(monthly_month, authorization)
+            income = Decimal(str(data["totalIncome"]))
+            expense = Decimal(str(data["totalExpense"]))
+            net = Decimal(str(data["netCashFlow"]))
+            label = f"{monthly_month[:4]} 年 {int(monthly_month[5:])} 月"
+            reply = (f"{label}收支统计：总收入 ¥{income:,.2f}，"
+                     f"总支出 ¥{expense:,.2f}，净现金流 ¥{net:,.2f}。")
+            return Response(reply=reply, intent=intent, data=data,
+                            source=bank_source(), requestId=request_id, routing=routing)
 
         if parsed is None:
             return Response(reply="无法确定收款人或金额。", intent="transfer", requestId=request_id, routing=routing)
@@ -133,7 +153,7 @@ async def chat(req: ChatRequest, authorization: str | None = Header(default=None
         resp = _response("prepared", result, "待确认转账订单已创建；尚未发生扣款。", request_id)
         resp.routing = routing
         return resp
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, InvalidOperation):
         raise HTTPException(status_code=502, detail="银行查询返回数据格式有误。")
     except bank.BankError as ex:
         _fail(ex)

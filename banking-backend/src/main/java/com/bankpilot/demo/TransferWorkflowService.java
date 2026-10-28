@@ -17,8 +17,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
-import org.springframework.transaction.annotation.Transactional;
 import java.sql.Timestamp;
+import org.springframework.transaction.annotation.Transactional;
+
 /**
  * All business state changes are DB-controlled. The LLM cannot approve or debit.
  * ONLY use with fabricated demo accounts. Not a production banking implementation.
@@ -280,22 +281,23 @@ public class TransferWorkflowService {
 @Transactional
 public StatusView cancel(long userId, long orderId) {
 
-    // 与执行转账使用同一加锁顺序
+    // 1. 与执行转账保持相同的加锁顺序
     lockUser(userId);
+
     Order order = loadOrder(userId, orderId, true);
 
-    // 已取消：幂等返回
+    // 2. 已取消订单：直接返回，保证幂等性
     if ("CANCELLED".equals(order.status())) {
         return status(userId, orderId);
     }
 
-    // 仅允许取消待确认或已授权未执行的订单
+    // 3. 只允许取消待确认或已授权未执行的订单
     if (!"PENDING_APPROVAL".equals(order.status())
             && !"AUTHORIZED".equals(order.status())) {
         conflict("Order cannot be cancelled");
     }
 
-    // 条件更新，避免与执行转账竞争
+    // 4. 条件更新订单状态，避免与转账执行竞争
     int updated = jdbc.update("""
         UPDATE transfer_orders
         SET status = 'CANCELLED',
@@ -313,7 +315,7 @@ public StatusView cancel(long userId, long orderId) {
         conflict("Order state changed");
     }
 
-    // 撤销尚有效的授权记录
+    // 5. 撤销授权记录，清除 OTP 敏感数据
     jdbc.update("""
         UPDATE approval_records
         SET approval_status = 'REJECTED',
@@ -329,10 +331,18 @@ public StatusView cancel(long userId, long orderId) {
         userId
     );
 
+    // 6. 清除内存中可能残留的 OTP
     otpVault.clear(orderId);
 
-    audit(userId, orderId, "USER_DECISION", "CANCELLED");
+    // 7. 写入银行业务审计
+    audit(
+        userId,
+        orderId,
+        "USER_DECISION",
+        "CANCELLED"
+    );
 
+    // 8. 返回数据库中的最终订单状态
     return status(userId, orderId);
 }
 

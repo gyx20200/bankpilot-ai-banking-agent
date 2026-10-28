@@ -5,6 +5,8 @@ Java must independently authenticate, authorize, enforce idempotency/transaction
 """
 import os
 import re
+from decimal import Decimal, InvalidOperation
+from urllib.parse import urlencode
 from typing import Any
 import httpx
 
@@ -75,6 +77,31 @@ async def subscriptions(bearer: str | None):
     value = await _request("GET", f"{READ_URL}/subscriptions", bearer)
     if not isinstance(value, list): raise BankError("代扣数据格式不正确。")
     return value
+
+
+async def get_monthly_analytics(month: str, bearer: str | None):
+    """Fetch SQL-backed monthly totals; model input never controls API path or SQL."""
+    if not bearer:
+        raise BankError("请先登录。", 401)
+    if not isinstance(month, str) or not re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", month):
+        raise BankError("月份必须使用 YYYY-MM 格式。", 400)
+
+    query = urlencode({"month": month})
+    report = await _request("GET", f"{READ_URL}/analytics/monthly?{query}", bearer)
+
+    required = ("month", "currency", "totalIncome", "totalExpense", "netCashFlow", "categories")
+    if not isinstance(report, dict) or any(field not in report for field in required):
+        raise BankError("月度分析结果格式不正确。")
+    if report["month"] != month or not isinstance(report["categories"], list):
+        raise BankError("银行返回的月份或分类信息不正确。")
+    for name in ("totalIncome", "totalExpense", "netCashFlow"):
+        try:
+            amount = Decimal(str(report[name]))
+        except (InvalidOperation, TypeError, ValueError) as ex:
+            raise BankError("银行返回的收支金额格式不正确。") from ex
+        if not amount.is_finite():
+            raise BankError("银行返回的收支金额格式不正确。")
+    return report
 
 
 def _validate_order(value):

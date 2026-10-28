@@ -115,6 +115,8 @@ public class TransferPrepareService {
             return statement;
         }, key);
         if (key.getKey() == null) throw new IllegalStateException("Order generated ID is missing");
+        jdbc.update("INSERT INTO audit_events(user_id,order_id,action,result,created_at) VALUES (?,?,?,?,?)",
+            userId, key.getKey().longValue(), "TRANSFER_PREPARE", "PENDING_APPROVAL", Timestamp.valueOf(now));
         return new TransferPrepareController.OrderView(key.getKey().longValue(), payee.name(), payee.accountMasked(),
             amount, risk, "PENDING_APPROVAL");
     }

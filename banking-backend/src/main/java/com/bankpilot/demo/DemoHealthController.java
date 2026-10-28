@@ -10,6 +10,6 @@ import org.springframework.web.bind.annotation.RestController;
 public class DemoHealthController {
     @GetMapping("/health")
     public Map<String, String> health() {
-        return Map.of("status", "ok", "service", "banking-backend", "mode", "day4-auth-otp-atomic-transfer-demo");
+        return Map.of("status", "ok", "service", "banking-backend", "mode", "day5-agent-tool-calling-demo");
     }
 }
