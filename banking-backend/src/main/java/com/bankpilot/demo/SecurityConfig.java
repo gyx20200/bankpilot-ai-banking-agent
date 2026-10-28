@@ -18,8 +18,7 @@ public class SecurityConfig {
     @Bean
     SecurityFilterChain apiSecurity(
             HttpSecurity http,
-            DemoTokenService tokens
-    ) throws Exception {
+            DemoTokenService tokens) throws Exception {
 
         http
             .csrf(csrf -> csrf.disable())
@@ -36,18 +35,19 @@ public class SecurityConfig {
 
             .authorizeHttpRequests(auth -> auth
 
-                // Allow Spring Boot to process errors normally.
+                // 允许 Spring Boot 内部错误分发，
+                // 防止业务异常的 400/422 被覆盖成 401
                 .dispatcherTypeMatchers(
                     DispatcherType.ERROR
                 ).permitAll()
 
-                // Public endpoints.
+                // 公开接口
                 .requestMatchers(
                     "/api/demo/health",
                     "/api/auth/demo-login"
                 ).permitAll()
 
-                // All business endpoints require authentication.
+                // 其他银行接口必须认证
                 .anyRequest().authenticated()
             )
 
@@ -57,14 +57,12 @@ public class SecurityConfig {
                         response.setStatus(
                             HttpServletResponse.SC_UNAUTHORIZED
                         );
-
                         response.setContentType(
                             MediaType.APPLICATION_JSON_VALUE
                         );
-
                         response.getWriter().write(
-                            "{\"error\":\"UNAUTHORIZED\","
-                            + "\"message\":\"Please log in\"}"
+                            "{\"error\":\"UNAUTHORIZED\"," +
+                            "\"message\":\"Please log in\"}"
                         );
                     }
                 )
