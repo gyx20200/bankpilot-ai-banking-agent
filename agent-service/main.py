@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 from typing import Any
 import logging
+import re
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from app.router import Intent, parse_intent, extract_month
@@ -15,6 +16,7 @@ from app import llm_router
 from app.transfer_parser import parse_transfer, normalize_amount
 from app import banking_client as bank
 from app.workflow_api import router as workflow_router
+from datetime import datetime, timedelta, timezone
 
 app = FastAPI(title="BankPilot Agent Day 6", version="0.6.0")
 app.include_router(workflow_router)
@@ -92,7 +94,30 @@ async def health():
     return {"status": "ok", "mode": "llm-day5" if llm_router.enabled() else "rules-day5",
             "bankMode": bank.BANK_MODE, "modelConfigured": llm_router.configured() if llm_router.enabled() else False,
             "modelName": llm_router.model_name()}
+def invalid_calendar_month(message: str) -> int | None:
+    """检查月度查询中是否包含明确不合法的月份。"""
 
+    # 只处理月度收支查询，不影响其他银行业务。
+    if parse_intent(message) != "monthly_analytics":
+        return None
+
+    patterns = (
+        # 今年13月、25年14月、2026年0月
+        # 排除“最近13个月”这种时间长度表达
+        r"(?<!\d)(\d{1,3})\s*月(?!\s*个)",
+
+        # 2026-13、2026-00、2026/14
+        r"(?<!\d)\d{4}\s*[-/]\s*(\d{1,2})(?!\d)",
+    )
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, message):
+            month = int(match.group(1))
+
+            if not 1 <= month <= 12:
+                return month
+
+    return None
 
 @app.post("/api/agent/chat", response_model=Response)
 async def chat(req: ChatRequest, authorization: str | None = Header(default=None)):
@@ -102,6 +127,19 @@ async def chat(req: ChatRequest, authorization: str | None = Header(default=None
     forbidden = ("跳过验证", "免验证", "不用确认", "忽略权限", "不需要确认", "绕过风控", "直接扣款", "不要转", "别转", "万元", "亿元")
     if any(word in req.message for word in forbidden):
         return Response(reply="无法跳过银行权限控制；操作未执行。", intent="unsupported", requestId=request_id)
+        # 先检查明确不合法的月份，避免无效模型调用。
+    invalid_month = invalid_calendar_month(req.message)
+
+    if invalid_month is not None:
+        return Response(
+            reply=(
+                f"你输入的 {invalid_month} 月不是有效月份。"
+                "月份必须在 1～12 之间，请重新输入。"
+            ),
+            intent="monthly_analytics",
+            requestId=request_id,
+            routing="validation"
+        )
     routing = "llm" if llm_router.enabled() else "rules"
     parsed = None
     monthly_month = None
@@ -147,6 +185,18 @@ async def chat(req: ChatRequest, authorization: str | None = Header(default=None
             if monthly_month is None:
                 return Response(reply="请提供明确的统计月份，例如 2026 年 10 月。", intent=intent,
                                 requestId=request_id, routing=routing)
+            # 查询月份不能超过当前银行业务月份
+            current_month = datetime.now(
+                timezone(timedelta(hours=8))
+            ).strftime("%Y-%m")
+
+            if monthly_month > current_month:
+                return Response(
+                    reply=f"{monthly_month} 是未来月份，暂不支持查询未来的历史收支。",
+                    intent=intent,
+                    requestId=request_id,
+                    routing="validation"
+                )
             data = await bank.get_monthly_analytics(monthly_month, authorization)
             income = Decimal(str(data["totalIncome"]))
             expense = Decimal(str(data["totalExpense"]))
