@@ -71,12 +71,54 @@ def test_execute_success(monkeypatch):
     assert run(bank.execute_subscription_cancellation('SC-1001', AUTH, 'execute-0001'))['status'] == 'SUCCESS'
 
 
+
 def test_get_order(monkeypatch):
+    calls = []
+
     async def fake_request(method, url, bearer=None, data=None):
-        assert method == 'GET' and url.endswith('/SC-1001') and bearer == AUTH
-        return {'orderId': 'SC-1001', 'status': 'PENDING_APPROVAL'}
+        assert method == 'GET'
+        assert bearer == AUTH
+        calls.append(url)
+
+        # 第一次：查询取消申请订单
+        if url.endswith('/SC-1001'):
+            return {
+                'orderId': 'SC-1001',
+                'subscriptionId': 2,
+                'merchantName': '音乐会员',
+                'status': 'PENDING_APPROVAL'
+            }
+
+        # 第二次：查询真实银行订阅状态
+        if url.endswith('/subscriptions'):
+            return [
+                {
+                    'id': 2,
+                    'merchantName': '音乐会员',
+                    'status': 'ACTIVE',
+                    'amount': 15.0,
+                    'billingCycle': 'MONTHLY'
+                }
+            ]
+
+        raise AssertionError(f'Unexpected bank API: {url}')
+
     monkeypatch.setattr(bank, '_request', fake_request)
-    assert run(bank.get_subscription_cancellation('SC-1001', AUTH))['status'] == 'PENDING_APPROVAL'
+
+    result = run(
+        bank.get_subscription_cancellation('SC-1001', AUTH)
+    )
+
+    assert result['orderId'] == 'SC-1001'
+    assert result['subscriptionId'] == 2
+    assert result['status'] == 'PENDING_APPROVAL'
+    assert result['subscriptionStatus'] == 'ACTIVE'
+
+    # 确认真正进行了两次查询
+    assert len(calls) == 2
+    assert calls[0].endswith('/SC-1001')
+    assert calls[1].endswith('/subscriptions')
+
 
 
 @pytest.mark.parametrize('bad_id', [0, -1, True, '2', None])

@@ -278,6 +278,48 @@ def _cancellation_response(value: Any, order_id: str | None = None) -> dict:
     return value
 
 
+
+async def _complete_subscription_status(
+    order: dict,
+    bearer: str
+) -> dict:
+    """从真实银行订阅查询补全取消订单缺少的订阅状态。"""
+
+    if order.get("subscriptionStatus") in ("ACTIVE", "CANCELLED"):
+        return order
+
+    sid = order.get("subscriptionId")
+
+    if type(sid) is not int or sid <= 0:
+        raise BankError("取消订单缺少有效订阅 ID。", 409)
+
+    # 使用同一个登录用户查询真实订阅
+    all_subscriptions = await subscriptions(bearer)
+
+    matches = [
+        sub for sub in all_subscriptions
+        if isinstance(sub, dict)
+        and type(sub.get("id")) is int
+        and sub["id"] == sid
+    ]
+
+    if len(matches) != 1:
+        raise BankError("无法唯一核实原订阅状态。", 409)
+
+    actual = matches[0]
+
+    if actual.get("merchantName") != order.get("merchantName"):
+        raise BankError("取消订单与银行订阅商户不一致。", 409)
+
+    status = actual.get("status")
+
+    if status not in ("ACTIVE", "CANCELLED"):
+        raise BankError("原订阅状态无法确认。", 409)
+
+    return {**order, "subscriptionStatus": status}
+
+
+
 async def prepare_subscription_cancellation(
         subscription_id: int, bearer: str | None, request_id: str
 ) -> dict:
@@ -326,47 +368,82 @@ async def execute_subscription_cancellation(
         "POST", f"{CANCELLATION_URL}/{oid}/execute", bearer,
         {"requestId": rid}
     ), oid)
+    response = await _complete_subscription_status(response, bearer)
     if response["status"] != "SUCCESS" or response.get("subscriptionStatus") != "CANCELLED":
         raise BankError("银行未确认代扣取消成功，请查询订单状态。")
     return response
 
 
-async def get_subscription_cancellation(order_id: str, bearer: str | None) -> dict:
-    """Read the real bank order status for checkpoint reconciliation."""
-    if not bearer:
-        raise BankError("请先登录。", 401)
-    oid = _oid(order_id)
-    response = _cancellation_response(await _request(
-        "GET", f"{CANCELLATION_URL}/{oid}", bearer
-    ), oid)
-    if response["status"] == "SUCCESS" and response.get("subscriptionStatus") != "CANCELLED":
-        raise BankError("订单成功状态与协议状态不一致，请核查银行记录。")
-    return response
 
-# Day 6 阶段 4D：拒绝待审批的取消申请
-async def reject_subscription_cancellation(
-        order_id: str, bearer: str | None, request_id: str
+async def get_subscription_cancellation(
+    order_id: str,
+    bearer: str | None
 ) -> dict:
     if not bearer:
-        raise BankError('请先登录。', 401)
+        raise BankError("请先登录。", 401)
 
     oid = _oid(order_id)
-    rid = _cancellation_request_id(request_id)
 
-    response = _cancellation_response(await _request(
-        'POST',
-        f'{CANCELLATION_URL}/{oid}/reject',
-        bearer,
-        {'requestId': rid},
-    ), oid)
+    response = _cancellation_response(
+        await _request(
+            "GET",
+            f"{CANCELLATION_URL}/{oid}",
+            bearer
+        ),
+        oid
+    )
+
+    response = await _complete_subscription_status(response, bearer)
 
     if (
-            response['status'] != 'REJECTED'
-            or response.get('subscriptionStatus') != 'ACTIVE'
+        response["status"] == "SUCCESS"
+        and response["subscriptionStatus"] != "CANCELLED"
     ):
         raise BankError(
-            '银行未确认拒绝取消申请，请查询订单状态。',
+            "订单成功状态与协议状态不一致，请核查银行记录。",
             409
         )
 
     return response
+
+
+# Day 6 阶段 4D：拒绝待审批的取消申请
+
+
+async def reject_subscription_cancellation(
+        order_id: str, bearer: str | None, request_id: str
+) -> dict:
+    """拒绝取消申请，兼容 Java 与 Mock 后端。"""
+
+    if not bearer:
+        raise BankError("请先登录。", 401)
+
+    oid = _oid(order_id)
+    rid = _cancellation_request_id(request_id)
+
+    if BANK_MODE == "mock":
+        url = f"{CANCELLATION_URL}/{oid}/reject"
+        payload = {"requestId": rid}
+        expected_status = "REJECTED"
+    else:
+        url = f"{CANCELLATION_URL}/{oid}/authorize"
+        payload = {"confirmed": False}
+        expected_status = "CANCELLED"
+
+    response = _cancellation_response(
+        await _request("POST", url, bearer, payload),
+        oid,
+    )
+    response = await _complete_subscription_status(response, bearer)
+
+    if (
+        response.get("status") != expected_status
+        or response.get("subscriptionStatus") != "ACTIVE"
+    ):
+        raise BankError(
+            "银行未确认拒绝取消申请，请查询订单状态。",
+            409,
+        )
+
+    return response
+

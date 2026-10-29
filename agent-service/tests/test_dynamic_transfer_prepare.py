@@ -67,7 +67,6 @@ def setup(monkeypatch, tasks, payees=None):
      {'type': 'transfer_prepare', 'payee_name': '李四', 'amount': '200'}],
 ])
 def test_transfer_combinations_prepare_and_pause(monkeypatch, tasks):
-
     events = setup(monkeypatch, tasks)
 
     message = (
@@ -108,17 +107,17 @@ def test_invalid_payee_cannot_create_order(monkeypatch, payees, status):
     assert not any(isinstance(e, tuple) for e in events)
 
 
-def test_combined_command_preflights_target_before_any_write(monkeypatch):
+def test_two_approval_tasks_rejected_before_any_bank_operation(monkeypatch):
+    """The planner rejects transfer + cancellation before any read or write."""
     events = setup(monkeypatch, [
         {'type': 'transfer_prepare', 'payee_name': '李四', 'amount': '200'},
         {'type': 'cancel_subscription', 'target_name': '视频会员'}])
-    # The real mixed workflow must stop without writing if the subscription
-    # cannot be matched, even if transfer payee/amount are valid.
-    from app.graph import dynamic_read_workflow as reads
-    async def no_subscriptions(auth):
-        return []
-    monkeypatch.setitem(reads.READ_EXECUTORS, 'subscriptions', no_subscriptions)
+
+    async def forbidden_subscription_lookup(auth):
+        raise AssertionError('Two-approval plan must be rejected before subscription lookup')
+
+    monkeypatch.setitem(reads.READ_EXECUTORS, 'subscriptions', forbidden_subscription_lookup)
     result, _ = run('给李四转200元并取消视频会员代扣')
-    assert result['status'] == 'TARGET_NOT_FOUND'
-    assert not any(isinstance(event, tuple) for event in events)
+    assert result['status'] == 'NEEDS_CLARIFICATION'
+    assert events == []
     assert not result.get('__interrupt__')

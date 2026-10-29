@@ -227,36 +227,88 @@ async def verify_cancelled(state: State, runtime: Runtime[Context]) -> dict:
             'details': '银行已确认代扣取消成功。'}
 
 
+def expected_rejected_order_status() -> str:
+    return "REJECTED" if bank.BANK_MODE == "mock" else "CANCELLED"
+
+
+
 async def reject_node(state: State, runtime: Runtime[Context]) -> dict:
     oid = state['cancellationOrder']['orderId']
     bearer = runtime.context['authorization']
+
+    # Java 和 Mock 的拒绝订单终态不同
+    expected_status = (
+        'REJECTED' if bank.BANK_MODE == 'mock'
+        else 'CANCELLED'
+    )
+
     try:
         order = await bank.reject_subscription_cancellation(
-            oid, bearer, state['rejectRequestId'])
+            oid, bearer, state['rejectRequestId']
+        )
     except bank.BankError:
+        # 如果 POST 已成功但响应丢失，只查询真实订单，不重复提交
         order = await bank.get_subscription_cancellation(oid, bearer)
-        if (order.get('status') != 'REJECTED'
-                or order.get('subscriptionStatus') != 'ACTIVE'):
+
+        if (
+            order.get('status') != expected_status
+            or order.get('subscriptionStatus') != 'ACTIVE'
+        ):
             raise
-    if (order.get('orderId') != oid
-            or order.get('subscriptionId') != state['candidate']['id']
-            or order.get('status') != 'REJECTED'
-            or order.get('subscriptionStatus') != 'ACTIVE'):
-        raise bank.BankError('银行未确认关闭取消申请，不能报告拒绝成功。', 409)
-    return {'cancellationOrder': order, 'status': 'REJECTED_PENDING_VERIFICATION'}
+
+    # 严格验证返回的订单和订阅
+    if (
+        order.get('orderId') != oid
+        or order.get('subscriptionId') != state['candidate']['id']
+        or order.get('status') != expected_status
+        or order.get('subscriptionStatus') != 'ACTIVE'
+    ):
+        raise bank.BankError(
+            '银行未确认关闭取消申请，不能报告拒绝成功。',
+            409
+        )
+
+    return {
+        'cancellationOrder': order,
+        'status': 'REJECTED_PENDING_VERIFICATION'
+    }
 
 
-async def verify_rejected(state: State, runtime: Runtime[Context]) -> dict:
+
+async def verify_rejected(
+    state: State,
+    runtime: Runtime[Context]
+) -> dict:
     oid = state['cancellationOrder']['orderId']
+
+    expected_status = (
+        'REJECTED' if bank.BANK_MODE == 'mock'
+        else 'CANCELLED'
+    )
+
+    # 再次向银行查询最终订单状态
     order = await bank.get_subscription_cancellation(
-        oid, runtime.context['authorization'])
-    if (order.get('orderId') != oid
-            or order.get('subscriptionId') != state['candidate']['id']
-            or order.get('status') != 'REJECTED'
-            or order.get('subscriptionStatus') != 'ACTIVE'):
-        raise bank.BankError('拒绝结果尚未确认，请核查银行订单。', 409)
-    return {'cancellationOrder': order, 'status': 'REJECTED',
-            'details': '用户已拒绝；银行已关闭取消申请，订阅保持 ACTIVE。'}
+        oid,
+        runtime.context['authorization']
+    )
+
+    if (
+        order.get('orderId') != oid
+        or order.get('subscriptionId') != state['candidate']['id']
+        or order.get('status') != expected_status
+        or order.get('subscriptionStatus') != 'ACTIVE'
+    ):
+        raise bank.BankError(
+            '拒绝结果尚未确认，请核查银行订单。',
+            409
+        )
+
+    return {
+        'cancellationOrder': order,
+        'status': 'REJECTED',
+        'details': '用户已拒绝；银行已关闭取消申请，订阅保持 ACTIVE。'
+    }
+
 
 
 

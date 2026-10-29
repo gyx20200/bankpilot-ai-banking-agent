@@ -126,6 +126,27 @@ async def dynamic_start(body: StartBody, authorization: str | None = Header(defa
     return view
 
 
+def _bank_verified_user_rejection(snapshot, state: dict, order: dict) -> bool:
+    """Reconcile only a SAVED user rejection with a verified terminal Java order.
+
+    Never derive a user's approval decision from the bank status alone, and
+    never perform a bank write from the GET status endpoint.
+    """
+    if state.get('approvalDecision') is not False or state.get('transferOrder'):
+        return False
+    remaining = set(snapshot.next or ())
+    if not remaining or not remaining.issubset({'reject', 'verify_rejected'}):
+        return False
+    saved_order = state.get('cancellationOrder') or {}
+    candidate = state.get('candidate') or {}
+    return (
+        str(order.get('orderId')) == str(saved_order.get('orderId'))
+        and order.get('subscriptionId') == candidate.get('id')
+        and order.get('status') == 'CANCELLED'
+        and order.get('subscriptionStatus') == 'ACTIVE'
+    )
+
+
 @router.get('/dynamic/{thread_id}')
 async def dynamic_status(thread_id: str, authorization: str | None = Header(default=None)):
     record = _owner(thread_id, authorization)
@@ -150,8 +171,21 @@ async def dynamic_status(thread_id: str, authorization: str | None = Header(defa
         elif state.get('cancellationOrder'):
             order = await bank.get_subscription_cancellation(
                 state['cancellationOrder']['orderId'], authorization)
-            if order.get('orderId') == state['cancellationOrder']['orderId'] and order.get('subscriptionId') == state['candidate']['id']:
+            if (str(order.get('orderId')) == str(state['cancellationOrder']['orderId'])
+                    and order.get('subscriptionId') == state['candidate']['id']):
                 view['bankOrderStatus'] = order['status']
+                view['bankSubscriptionStatus'] = order.get('subscriptionStatus')
+                # A failed post-decision graph step may leave a checkpoint with
+                # pending 'reject' or 'verify_rejected', even though Java has
+                # already closed the application.  Reconcile only when the
+                # original explicit rejection is stored in the graph state.
+                if _bank_verified_user_rejection(snap, state, order):
+                    view['status'] = 'REJECTED'
+                    view['details'] = ('已核对原银行取消申请为 CANCELLED，'
+                                       '原订阅保持 ACTIVE；用户拒绝已生效。')
+                    view['approvalDecision'] = False
+                    view['reconciledFromBank'] = True
+                    record.update(finished=True, decision=False, last=view)
     except (bank.BankError, HTTPException):
         view['bankOrderStatus'] = 'UNKNOWN'
     return view

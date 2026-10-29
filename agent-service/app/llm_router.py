@@ -64,14 +64,40 @@ prepare_transfer 只创建待审批订单：不能宣称交易成功，金额不
 不要把账户余额、交易状态、付款成功与否编造为模型文本；这些必须由银行服务提供。
 """
 
+
 BANK_TIMEZONE = timezone(timedelta(hours=8))
-def build_system_prompt() -> str:
-    today = datetime.now(BANK_TIMEZONE).date()
+
+def build_system_prompt(current_date: date | None = None) -> str:
+    """生成包含北京时间及相对日期示例的系统提示词。"""
+    today = (
+        current_date
+        if current_date is not None
+        else datetime.now(BANK_TIMEZONE).date()
+    )
+
+    this_month = today.strftime("%Y-%m")
+    previous_month = (
+        today.replace(day=1) - timedelta(days=1)
+    ).strftime("%Y-%m")
+
+    this_year_july = f"{today.year}-07"
+    last_year_july = f"{today.year - 1}-07"
+    previous_year_december = f"{today.year - 1}-12"
+
     return (
         f"{SYSTEM_PROMPT}\n\n"
         f"当前银行业务日期：{today.isoformat()}（北京时间）。\n"
         "请结合当前日期理解用户的自然语言时间表达，"
         "并将相关月份转换为 YYYY-MM 格式。\n"
+        f"日期转换示例：本月→{this_month}；"
+        f"上个月→{previous_month}；"
+        f"今年7月→{this_year_july}；"
+        f"去年7月→{last_year_july}；"
+        f"去年12月→{previous_year_december}。\n"
+        "如果用户明确说今年、去年、本月、上个月等，"
+        "应根据当前银行业务日期计算对应年份和月份。\n"
+        "如果用户没有明确年份，且上下文无法确定具体年份，"
+        "不得猜测年份，应要求用户补充具体年月。\n"
         "根据用户需求选择合适的银行工具，"
         "月度收支分析使用 get_monthly_analytics。"
     )
