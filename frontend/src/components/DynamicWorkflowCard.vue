@@ -9,7 +9,7 @@ const props = defineProps({
   actionError: { type: String, default: '' },
   otpNotice: { type: String, default: '' },
 })
-const emit = defineEmits(['decision', 'otpRequest'])
+const emit = defineEmits(['decision', 'otpRequest', 'refresh', 'recover'])
 const confirmed = ref(false)
 const otp = ref('')
 const otpRequested = ref(false)
@@ -28,7 +28,14 @@ const transactions = computed(() => results.value.get_transactions?.status === '
 const payees = computed(() => results.value.get_payees?.status === 'SUCCESS' && Array.isArray(results.value.get_payees.data) ? results.value.get_payees.data : null)
 const subscriptions = computed(() => results.value.list_subscriptions?.status === 'SUCCESS' && Array.isArray(results.value.list_subscriptions.data) ? results.value.list_subscriptions.data : null)
 const monthly = computed(() => results.value.monthly_analytics?.status === 'SUCCESS' ? results.value.monthly_analytics.data : null)
-const outcomes = computed(() => props.task.writeOutcomes || {})
+const requested = computed(() => new Set(planTasks.value.map(t => t.type)))
+const showBalance = computed(() => balance.value && requested.value.has('get_balance'))
+const showTransactions = computed(() => transactions.value && requested.value.has('get_transactions'))
+const showPayees = computed(() => payees.value && requested.value.has('get_payees'))
+const showSubscriptions = computed(() => subscriptions.value && requested.value.has('list_subscriptions'))
+const showMonthly = computed(() => monthly.value && requested.value.has('monthly_analytics'))
+const hasVisibleRead = computed(() => showBalance.value || showTransactions.value || showPayees.value || showSubscriptions.value || showMonthly.value)
+const technicalOpen = ref(false)
 
 const taskNames = {
   get_balance: '查询余额', get_transactions: '最近交易', get_payees: '查询收款人',
@@ -36,7 +43,7 @@ const taskNames = {
   transfer_prepare: '模拟转账', cancel_subscription: '取消代扣',
 }
 const states = {
-  COMPLETED: '全部完成', PARTIALLY_COMPLETED: '部分完成', REJECTED: '全部拒绝 / 已拒绝',
+  COMPLETED: '任务完成', REJECTED: '用户已拒绝', NOT_CONFIRMED: '银行结果待核查',
   WAITING_TRANSFER_APPROVAL: '等待转账审批', WAITING_APPROVAL: '等待代扣审批',
   NEEDS_CLARIFICATION: '需要补充信息', NOT_IMPLEMENTED_YET: '未支持的操作',
   TARGET_NOT_FOUND: '未找到有效订阅', TARGET_AMBIGUOUS: '多个订阅匹配',
@@ -64,11 +71,9 @@ function labelOf(item) {
   if (item.type === 'cancel_subscription') return `${taskNames[item.type]}（${item.target_name || '未知'}）`
   return taskNames[item.type] || item.type
 }
-function outcomeLabel(value) {
-  return value === 'SUCCESS' ? '成功' : value === 'REJECTED' ? '已拒绝' : (value || '等待最终结果')
-}
 function approve(kind) {
   localError.value = ''
+  if (props.busy || props.locked) return
   if (!confirmed.value) { localError.value = '请先核对金额和业务对象，并勾选明确确认。'; return }
   if (kind === 'transfer' && riskRed.value) {
     if (!otpRequested.value) { localError.value = 'RED 风险请先向银行申请验证码。'; return }
@@ -79,6 +84,7 @@ function approve(kind) {
   otp.value = '' // Never send OTP to model or store it in conversation messages.
 }
 function reject(kind) {
+  if (props.busy || props.locked) return
   localError.value = ''
   emit('decision', { threadId: props.task.threadId, kind, approved: false })
   otp.value = ''
@@ -86,152 +92,120 @@ function reject(kind) {
 </script>
 
 <template>
-  <section class="panel dynamic-workflow" aria-label="LangGraph 动态任务结果">
-    <div class="wf-header">
-      <strong>BankPilot · 动态任务工作流</strong>
-      <span class="wf-state" :class="{ waiting: isTransferPending || isCancellationPending, done: status === 'COMPLETED' }">{{ states[status] || status }}</span>
+  <div class="workflow-results" aria-label="银行业务处理结果">
+    <div class="result-status-row">
+      <span class="result-status-icon" :class="{ 'is-done': status === 'COMPLETED', 'is-waiting': isTransferPending || isCancellationPending }" aria-hidden="true">{{ status === 'COMPLETED' ? '✓' : (isTransferPending || isCancellationPending ? '·' : 'i') }}</span>
+      <span class="result-status-text">{{ states[status] || '处理结果' }}</span>
+      <span v-if="planTasks.length > 1" class="result-multi">{{ planTasks.length }} 项任务</span>
     </div>
-    <p class="wf-meta">线程 {{ task.threadId || '—' }}</p>
 
-    <div v-if="planTasks.length" class="wf-block">
-      <h4>任务规划</h4>
-      <div v-for="(item, i) in planTasks" :key="`${item.type}-${i}`" class="wf-line">
-        <span>{{ i + 1 }}. {{ labelOf(item) }}</span><span class="small-muted">{{ item.type }}</span>
+    <div v-if="showBalance" class="result-card balance-card" aria-label="账户余额">
+      <div class="result-title"><span class="result-glyph blue" aria-hidden="true">¥</span><div><strong>账户余额</strong><small>{{ balance.accountNoMasked || '当前账户' }}</small></div><span class="result-title-side">实时查询</span></div>
+      <div class="balance-amount">{{ money(balance.balance) }}</div>
+      <p class="balance-hint">数据来自银行账户接口</p>
+    </div>
+
+    <div v-if="showTransactions" class="result-card">
+      <div class="result-title"><span class="result-glyph lilac" aria-hidden="true">≡</span><div><strong>最近交易</strong><small>银行交易明细</small></div><span class="result-title-side">{{ transactions.length }} 笔</span></div>
+      <div v-if="!transactions.length" class="empty-line">暂无交易记录</div>
+      <div v-for="(t, i) in transactions.slice(0, 20)" :key="t.id || i" class="result-line"><div><strong>{{ merchant(t) }}</strong><small>{{ when(t) }} {{ t.category ? ' · ' + t.category : '' }}</small></div><b :class="t.direction === 'IN' ? 'money-in' : 'money-out'">{{ t.direction === 'IN' ? '+' : '−' }}{{ money(t.amount) }}</b></div>
+      <p v-if="transactions.length > 20" class="soft-note">仅显示前 20 笔，完整结果可通过银行流水查看。</p>
+    </div>
+
+    <div v-if="showPayees" class="result-card">
+      <div class="result-title"><span class="result-glyph lilac" aria-hidden="true">◇</span><div><strong>常用收款人</strong><small>已保存的银行收款账户</small></div></div>
+      <div v-if="!payees.length" class="empty-line">暂无常用收款人</div>
+      <div v-for="(p, i) in payees" :key="p.id || i" class="result-line"><div><strong>{{ p.payeeName || '未知收款人' }}</strong><small>{{ p.payeeAccountMasked || p.accountMasked || '' }}</small></div></div>
+    </div>
+
+    <div v-if="showSubscriptions" class="result-card">
+      <div class="result-title"><span class="result-glyph teal" aria-hidden="true">↻</span><div><strong>自动扣费</strong><small>已开通的订阅和代扣协议</small></div><span class="result-title-side">{{ subscriptions.length }} 项</span></div>
+      <div v-if="!subscriptions.length" class="empty-line">暂无订阅代扣</div>
+      <div v-for="(s, i) in subscriptions" :key="s.id || i" class="result-line"><div><strong>{{ merchant(s) }}</strong><small>{{ s.billingCycle === 'MONTHLY' ? '每月扣费' : (s.billingCycle || '自动扣费') }} · {{ s.status === 'CANCELLED' ? '已取消' : (s.status === 'ACTIVE' ? '生效中' : s.status) }}</small></div><b>{{ money(s.amount) }}</b></div>
+      <p v-if="cancellation" class="soft-note">这里展示的是任务开始时的订阅信息，最新状态以取消订单结果为准。</p>
+    </div>
+
+    <MonthlyAnalyticsCard v-if="showMonthly" :data="monthly" />
+
+    <div v-if="order" class="result-card transfer-card" aria-label="转账订单">
+      <div class="result-title"><span class="result-glyph blue" aria-hidden="true">↗</span><div><strong>模拟转账</strong><small>{{ order.status === 'SUCCESS' ? '银行已确认执行成功' : (order.status === 'CANCELLED' || order.status === 'REJECTED' ? '该笔转账已取消' : '请核对以下交易信息') }}</small></div><span class="risk-pill" :class="order.riskLevel === 'RED' ? 'risk-red' : 'risk-yellow'">{{ order.riskLevel === 'RED' ? '高风险 · OTP' : (order.riskLevel === 'YELLOW' ? '需人工确认' : (order.riskLevel || '待核查')) }}</span></div>
+      <div class="transfer-amount">{{ money(order.amount) }}</div>
+      <div class="detail-grid"><div><span>收款人</span><strong>{{ order.payeeName || task.transferCandidate?.payeeName || '—' }}</strong></div><div><span>收款账户</span><strong>{{ order.accountMasked || task.transferCandidate?.accountMasked || '—' }}</strong></div></div>
+      <div class="order-current"><span>银行状态</span><strong :class="order.status === 'SUCCESS' ? 'state-success' : ''">{{ order.status === 'SUCCESS' ? '转账成功' : (order.status === 'PENDING_APPROVAL' ? '待批准' : (order.status || '核查中')) }}</strong></div>
+    </div>
+
+    <div v-if="isTransferPending" class="approval-card" aria-label="转账人工审批">
+      <div class="approval-heading"><span class="approval-mark" aria-hidden="true">!</span><div><strong>请确认这笔转账</strong><p>确认仅针对本笔转账，不代表同意其他业务。</p></div></div>
+      <div v-if="riskRed" class="otp-area">
+        <div class="otp-head"><div><strong>银行安全验证</strong><small>高风险转账需要一次性验证码</small></div><button type="button" class="otp-request" :disabled="busy || locked" @click="emit('otpRequest', task.threadId)">申请验证码</button></div>
+        <p v-if="otpNotice" class="otp-feedback" role="status">{{ otpNotice }}</p>
+        <input v-model="otp" type="password" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="输入六位 OTP 验证码" aria-label="六位银行验证码" :disabled="busy || locked" />
+        <p class="otp-hint">验证码仅用于本次授权，不会保存到聊天记录。</p>
       </div>
-      <p class="small-muted">任务依赖由 LangGraph 补全；新增的查询依赖不需要再次审批。</p>
+      <label class="approval-check"><input v-model="confirmed" type="checkbox" :disabled="busy || locked" /> <span>我已核对收款人、金额及账户，明确批准这笔模拟转账。</span></label>
+      <div class="approval-actions"><button class="approval-primary" type="button" :disabled="busy || locked || !confirmed || (riskRed && (!otpRequested || !/^\d{6}$/.test(otp)))" @click="approve('transfer')">{{ busy ? '处理中…' : '确认转账' }}</button><button class="approval-secondary" type="button" :disabled="busy || locked" @click="reject('transfer')">拒绝转账</button></div>
     </div>
 
-    <div v-if="balance || transactions || payees || subscriptions" class="wf-block">
-      <h4>银行查询结果</h4>
-      <div v-if="balance" class="wf-balance">
-        <span>账户余额 {{ balance.accountNoMasked || '' }}</span>
-        <strong>{{ money(balance.balance) }}</strong>
-      </div>
-      <template v-if="transactions">
-        <h5>交易流水</h5>
-        <p v-if="!transactions.length" class="small-muted">暂无流水</p>
-        <div v-for="(t, i) in transactions" :key="t.id || i" class="wf-line">
-          <span>{{ merchant(t) }}<small>{{ when(t) }} · {{ t.category || '' }}</small></span>
-          <strong>{{ t.direction === 'IN' ? '+' : '−' }}{{ money(t.amount) }}</strong>
-        </div>
-      </template>
-      <template v-if="payees">
-        <h5>常用收款人</h5>
-        <p v-if="!payees.length" class="small-muted">暂无记录</p>
-        <div v-for="(p, i) in payees" :key="p.id || i" class="wf-line">
-          <span>{{ p.payeeName || '未知' }}</span><span>{{ p.payeeAccountMasked || p.accountMasked || '' }}</span>
-        </div>
-      </template>
-      <template v-if="subscriptions">
-        <h5>订阅代扣</h5>
-        <p v-if="!subscriptions.length" class="small-muted">暂无订阅</p>
-        <div v-for="(s, i) in subscriptions" :key="s.id || i" class="wf-line">
-          <span>{{ merchant(s) }}<small>{{ s.status }} · {{ s.billingCycle || '' }}</small></span>
-          <strong>{{ money(s.amount) }}</strong>
-        </div>
-        <p class="small-muted">上面为任务开始时的订阅快照；如已取消，请以下方订单核实状态为准。</p>
-      </template>
+    <div v-if="cancellation" class="result-card cancel-card" aria-label="取消代扣申请">
+      <div class="result-title"><span class="result-glyph teal" aria-hidden="true">↻</span><div><strong>取消自动扣费</strong><small>{{ task.candidate?.merchantName || '订阅服务' }}</small></div><span class="result-title-side">{{ cancellation.status === 'SUCCESS' ? '已取消' : cancellation.status === 'REJECTED' ? '已保留订阅' : '等待确认' }}</span></div>
+      <div class="cancel-amount"><strong>{{ money(task.candidate?.amount) }}</strong><span>{{ task.candidate?.billingCycle === 'MONTHLY' ? '每月扣费' : '订阅金额' }}</span></div>
+      <div class="order-current"><span>订阅状态</span><strong :class="cancellation.subscriptionStatus === 'CANCELLED' ? 'state-success' : ''">{{ cancellation.subscriptionStatus === 'CANCELLED' ? '已取消' : cancellation.subscriptionStatus === 'ACTIVE' ? '仍然有效' : (cancellation.subscriptionStatus || '待核查') }}</strong></div>
     </div>
 
-    <MonthlyAnalyticsCard v-if="monthly" :data="monthly" />
-
-    <div v-if="order" class="wf-block">
-      <div class="wf-title-row"><h4>转账订单</h4><span class="wf-risk" :class="order.riskLevel === 'RED' ? 'red' : 'yellow'">{{ order.riskLevel || '风险待核查' }}</span></div>
-      <div class="wf-total">{{ money(order.amount) }}</div>
-      <div class="wf-line"><span>收款人</span><strong>{{ order.payeeName || task.transferCandidate?.payeeName || '—' }}</strong></div>
-      <div class="wf-line"><span>收款账户</span><strong>{{ order.accountMasked || task.transferCandidate?.accountMasked || '—' }}</strong></div>
-      <div class="wf-line"><span>转账订单号</span><span class="wf-id">{{ order.orderId }}</span></div>
-      <div class="wf-line"><span>银行订单状态</span><strong>{{ order.status }}</strong></div>
+    <div v-if="isCancellationPending" class="approval-card" aria-label="代扣取消人工审批">
+      <div class="approval-heading"><span class="approval-mark" aria-hidden="true">!</span><div><strong>请确认取消自动扣费</strong><p>此次复合任务最多包含一项需要审批的业务，确认仅作用于这一项订阅。</p></div></div>
+      <label class="approval-check"><input v-model="confirmed" type="checkbox" :disabled="busy || locked" /><span>我已核对订阅名称，明确同意取消这项自动扣费。</span></label>
+      <div class="approval-actions"><button class="approval-primary" type="button" :disabled="busy || locked || !confirmed" @click="approve('cancel')">{{ busy ? '处理中…' : '确认取消' }}</button><button class="approval-secondary" type="button" :disabled="busy || locked" @click="reject('cancel')">保留订阅</button></div>
     </div>
 
-    <div v-if="isTransferPending" class="wf-approval" aria-label="转账人工审批">
-      <h4>第一项审批：确认本次转账</h4>
-      <p>请核对收款人、掩码账号和金额。确认只授权这一笔转账，不代表同意取消代扣。</p>
-      <div v-if="riskRed" class="otp-box">
-        <div class="wf-actions">
-          <button type="button" class="secondary" :disabled="busy || locked" @click="emit('otpRequest', task.threadId)">申请银行 OTP</button>
-        </div>
-        <p v-if="otpNotice" class="small-muted" role="status">{{ otpNotice }}</p>
-        <label for="bank-otp" class="otp-label-inline">六位银行验证码
-          <input id="bank-otp" v-model="otp" type="password" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="请输入六位验证码" :disabled="busy || locked" />
-        </label>
-        <p class="small-muted">验证码由银行校验。请勿在聊天输入框发送 OTP。</p>
-      </div>
-      <label class="wf-check"><input v-model="confirmed" type="checkbox" :disabled="busy || locked" /> 我已核对本次转账信息，明确批准这笔模拟交易</label>
-      <div class="wf-actions">
-        <button type="button" class="primary" :disabled="busy || locked || !confirmed || (riskRed && (!otpRequested || !/^\d{6}$/.test(otp)))" @click="approve('transfer')">{{ busy ? '处理中…' : '批准本次转账' }}</button>
-        <button type="button" class="secondary" :disabled="busy || locked" @click="reject('transfer')">拒绝转账</button>
-      </div>
+    <div v-if="task.details && !['COMPLETED', 'WAITING_TRANSFER_APPROVAL', 'WAITING_APPROVAL'].includes(status)" class="result-detail-note">{{ task.details }}</div>
+    <div v-if="localError || actionError" class="result-error" role="alert">{{ localError || actionError }}</div>
+    <div v-if="locked" class="result-lock" role="alert">银行状态暂时无法确认，已锁定审批操作。请先核实原订单，避免重复提交。</div>
+    <div v-if="task.threadId && (locked || isTransferPending || isCancellationPending || status === 'NOT_CONFIRMED')" class="approval-actions">
+      <button type="button" class="approval-secondary" :disabled="busy" @click="emit('refresh', task.threadId)">刷新原任务状态</button>
+      <button v-if="status === 'NOT_CONFIRMED' && typeof task.approvalDecision === 'boolean'" type="button" class="approval-secondary" :disabled="busy" @click="emit('recover', task.threadId, task.approvalDecision)">按原审批决定恢复</button>
     </div>
+    <p v-if="task.bankOrderStatus" class="soft-note">银行原订单状态：{{ task.bankOrderStatus }}（不会自动创建新订单）</p>
 
-    <div v-if="cancellation" class="wf-block">
-      <h4>代扣取消申请</h4>
-      <div class="wf-line"><span>订阅名称</span><strong>{{ task.candidate?.merchantName || '—' }}</strong></div>
-      <div class="wf-line"><span>订阅金额</span><strong>{{ money(task.candidate?.amount) }}</strong></div>
-      <div class="wf-line"><span>申请编号</span><span class="wf-id">{{ cancellation.orderId }}</span></div>
-      <div class="wf-line"><span>申请状态</span><strong>{{ cancellation.status }}</strong></div>
-      <div class="wf-line"><span>订阅状态</span><strong>{{ cancellation.subscriptionStatus || '待查询' }}</strong></div>
-    </div>
-
-    <div v-if="isCancellationPending" class="wf-approval" aria-label="取消代扣人工审批">
-      <h4>{{ order ? '第二项审批：取消代扣' : '确认取消代扣' }}</h4>
-      <p>批准后银行才会尝试取消当前订阅。拒绝后订阅保持有效。此决定与此前转账审批相互独立。</p>
-      <label class="wf-check"><input v-model="confirmed" type="checkbox" :disabled="busy || locked" /> 我已核对订阅名称和金额，明确同意取消该项代扣</label>
-      <div class="wf-actions">
-        <button type="button" class="primary" :disabled="busy || locked || !confirmed" @click="approve('cancel')">{{ busy ? '处理中…' : '批准取消代扣' }}</button>
-        <button type="button" class="secondary" :disabled="busy || locked" @click="reject('cancel')">拒绝，保留代扣</button>
-      </div>
-    </div>
-
-    <div v-if="Object.keys(outcomes).length" class="wf-block">
-      <h4>多业务最终结果</h4>
-      <div v-if="outcomes.transfer_prepare" class="wf-line"><span>转账</span><strong>{{ outcomeLabel(outcomes.transfer_prepare) }}</strong></div>
-      <div v-if="outcomes.cancel_subscription" class="wf-line"><span>取消代扣</span><strong>{{ outcomeLabel(outcomes.cancel_subscription) }}</strong></div>
-      <p class="small-muted">不同业务之间不自动回滚已完成的银行交易。</p>
-    </div>
-
-    <p v-if="task.details" class="wf-note">{{ task.details }}</p>
-    <p v-if="localError || actionError" class="wf-error" role="alert">{{ localError || actionError }}</p>
-    <p v-if="locked" class="wf-warning" role="alert">银行状态存在不确定性，已锁定本卡片的审批按钮。请通过原银行订单号核查，勿再次创建相同订单。</p>
-    <p class="wf-meta wf-footer">模型只规划任务；审批来自用户操作，最终结果以 Mock/Java 银行接口为准。</p>
-  </section>
+    <details class="technical-details">
+      <summary>查看订单信息</summary>
+      <div v-if="order?.orderId">转账订单：{{ order.orderId }}</div>
+      <div v-if="cancellation?.orderId">代扣申请：{{ cancellation.orderId }}</div>
+      <div v-if="task.threadId">任务编号：{{ task.threadId }}</div>
+    </details>
+  </div>
 </template>
 
 <style scoped>
-.dynamic-workflow { width:min(740px,100%); max-width:100%; min-width:0; display:flex; flex-direction:column; gap:14px; box-sizing:border-box; }
-.wf-header,.wf-title-row {display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap}
-.wf-header strong {font-size:14px;color:#223e60}
-.wf-state {font-size:11px;background:#eef1f5;color:#61738b;border-radius:8px;padding:6px 9px}
-.wf-state.waiting {background:#fff1d3;color:#8a621d}
-.wf-state.done {background:#e4f7ee;color:#18764f}
-.wf-meta,.small-muted {font-size:11px;color:#8293a7;line-height:1.7;overflow-wrap:anywhere}
-.wf-meta {margin:0}.wf-footer{border-top:1px solid #e9eef5;padding-top:12px}
-.wf-block {border:1px solid #e1e9f1;border-radius:12px;padding:14px;min-width:0}
-.wf-block h4,.wf-approval h4{font-size:13px;color:#213d5b;margin:0 0 10px}
-.wf-block h5 {font-size:12px;color:#506b86;margin:14px 0 7px}
-.wf-block p.small-muted{margin-bottom:0}
-.wf-line {display:flex;justify-content:space-between;gap:14px;align-items:flex-start;padding:9px 0;border-bottom:1px solid #eef2f7;font-size:12px;line-height:1.5}
-.wf-line:last-child {border-bottom:0}
-.wf-line span,.wf-line strong{min-width:0;overflow-wrap:anywhere}
-.wf-line>span:first-child{color:#50657c}
-.wf-line strong{text-align:right;color:#20374f}
-.wf-line small{display:block;color:#8c9cad;margin-top:3px}
-.wf-line .small-muted{font-size:10px}
-.wf-balance{background:#eff5fd;border-radius:10px;padding:12px;display:flex;gap:6px;flex-direction:column}
-.wf-balance span{font-size:12px;color:#71849c}.wf-balance strong{font-size:23px;color:#1d567f}
-.wf-total{font-size:26px;font-weight:800;color:#164475;text-align:center;padding:10px 0}
-.wf-risk{font-size:11px;border-radius:7px;padding:5px 8px}.wf-risk.red{background:#ffe8e8;color:#a53b3b}.wf-risk.yellow{background:#fff3d3;color:#9b6b1f}
-.wf-id{overflow-wrap:anywhere;font-family:ui-monospace,monospace;text-align:right;color:#466587}
-.wf-approval{background:#fff9ed;border:1px solid #f0dfb8;border-radius:12px;padding:14px}
-.wf-approval p{font-size:12px;line-height:1.8;color:#70623e;margin:0 0 11px}
-.wf-check{display:flex;gap:9px;align-items:flex-start;font-size:12px;line-height:1.65;color:#4b6178;margin-bottom:13px}
-.wf-check input{margin-top:4px}
-.wf-actions{display:flex;gap:9px;flex-wrap:wrap}.wf-actions button{border-radius:8px;padding:10px 13px;font-size:12px}
-.otp-box{background:white;border:1px solid #efe3c8;border-radius:10px;padding:12px;margin-bottom:12px}
-.otp-box p{margin-top:9px}.otp-label-inline{font-size:12px;color:#4a6179;display:flex;flex-direction:column;gap:6px;margin-top:10px}
-.otp-label-inline input{border:1px solid #cbd7e5;border-radius:8px;padding:9px 11px;width:min(240px,100%)}
-.wf-note{font-size:12px;color:#57708b;background:#eff5fc;border-radius:9px;padding:10px;margin:0;line-height:1.7}
-.wf-error{font-size:12px;color:#ad3333;background:#fff0f0;border-radius:9px;padding:10px;margin:0;line-height:1.7}
-.wf-warning{font-size:12px;color:#905d11;background:#fff3d4;border-radius:9px;padding:10px;margin:0;line-height:1.7}
-@media(max-width:530px){.wf-line{gap:8px}.wf-actions button{flex:1}.wf-block{padding:11px}.dynamic-workflow{padding:12px}}
+.workflow-results{display:flex;flex-direction:column;gap:12px;width:min(640px,100%);min-width:0;margin-top:10px;color:#203552}
+.result-status-row{display:flex;align-items:center;gap:9px;padding:1px 2px 5px}
+.result-status-icon{display:grid;place-items:center;width:24px;height:24px;border-radius:8px;background:#eaf0fb;color:#5278a9;font-weight:800}
+.result-status-icon.is-waiting{background:#fff2dc;color:#a77525;font-size:26px;line-height:0}
+.result-status-icon.is-done{background:#e4f5eb;color:#168057;font-size:14px}
+.result-status-text{font-size:12px;font-weight:700;color:#52677e}.result-multi{margin-left:auto;color:#8b9aae;font-size:11px}
+.result-card{background:#fff;border:1px solid #e1e8f2;border-radius:16px;padding:20px 22px;box-shadow:0 4px 18px rgba(35,60,94,.035)}
+.result-title{display:flex;align-items:center;gap:12px;min-width:0}
+.result-title>div{min-width:0;display:grid;gap:3px}.result-title strong{font-size:14px;font-weight:750;color:#1b324e}.result-title small{font-size:11px;color:#8c9aab}
+.result-title-side{font-size:11px;color:#6b88ab;background:#f1f6fc;padding:6px 9px;border-radius:7px;margin-left:auto;white-space:nowrap}
+.result-glyph{display:grid;place-items:center;width:36px;height:36px;border-radius:11px;font-weight:800;font-size:17px;flex-shrink:0}
+.result-glyph.blue{background:#e9f2ff;color:#3479c9}.result-glyph.lilac{background:#f0effd;color:#8071bb}.result-glyph.teal{background:#e7f8f4;color:#269b84}
+.balance-card{background:linear-gradient(135deg,#fff 40%,#f3f8ff 100%)}
+.balance-amount{font-size:clamp(28px,4vw,36px);font-weight:800;letter-spacing:-.9px;color:#164a82;margin:19px 0 6px;font-variant-numeric:tabular-nums}.balance-hint,.soft-note{font-size:11px;color:#92a0b0;line-height:1.65;margin:8px 0 0}
+.result-line{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:13px 0;border-bottom:1px solid #eff2f7;font-size:13px}
+.result-line:last-of-type{border-bottom:0}.result-line>div{display:grid;gap:4px}.result-line strong{color:#273f5b;font-size:13px}.result-line small{color:#9aa6b3;font-size:11px}.result-line b{font-size:13px;color:#325171;font-weight:700;white-space:nowrap}.money-in,.state-success{color:#138660!important}.money-out{color:#2d577f!important}
+.empty-line{padding:15px 2px 5px;color:#94a2b0;font-size:12px}
+.transfer-amount{font-size:clamp(27px,4vw,36px);font-weight:800;text-align:center;color:#153d72;letter-spacing:-.8px;margin:23px 0 17px;font-variant-numeric:tabular-nums}
+.detail-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:14px}
+.detail-grid>div{background:#f6f9fd;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:6px;min-width:0}.detail-grid span{font-size:11px;color:#8797aa}.detail-grid strong{font-size:13px;color:#213c5b;overflow-wrap:anywhere}
+.order-current{border-top:1px solid #edf1f7;padding-top:13px;display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#8394a6}.order-current strong{color:#44617e}
+.risk-pill{margin-left:auto;white-space:nowrap;font-size:11px;font-weight:650;padding:7px 9px;border-radius:8px}.risk-yellow{background:#fff3df;color:#a77525}.risk-red{background:#fff0ed;color:#c05242}
+.cancel-amount{display:flex;align-items:baseline;gap:10px;margin:21px 0 16px}.cancel-amount strong{font-size:27px;color:#1d456e}.cancel-amount span{font-size:12px;color:#95a2b0}
+.approval-card{border:1px solid #ecd8b6;background:#fffaf1;border-radius:16px;padding:19px 20px}
+.approval-heading{display:flex;gap:10px;align-items:flex-start}.approval-mark{display:grid;place-items:center;border-radius:9px;background:#ffe6ad;color:#916519;width:30px;height:30px;font-weight:800;flex-shrink:0}.approval-heading strong{font-size:14px;color:#5d491f}.approval-heading p{font-size:12px;color:#9e865c;line-height:1.6;margin:4px 0 0}
+.approval-check{display:flex;align-items:flex-start;gap:10px;line-height:1.7;color:#6d634f;font-size:12px;margin:17px 0 14px}.approval-check input{accent-color:#2372c4;flex-shrink:0;margin-top:4px;width:15px;height:15px}
+.approval-actions{display:flex;gap:10px;flex-wrap:wrap}.approval-actions button{border-radius:10px;padding:11px 18px;font-weight:700;font-size:12px;transition:transform .15s,box-shadow .15s}.approval-actions button:not(:disabled):hover{transform:translateY(-1px)}.approval-primary{background:#236ebc;color:white;border:1px solid #236ebc;box-shadow:0 3px 8px rgba(35,110,188,.17)}.approval-secondary{background:white;color:#51677e;border:1px solid #d5e0ea}.approval-actions button:disabled{opacity:.45;cursor:not-allowed;box-shadow:none}
+.otp-area{background:white;border:1px solid #efdfc5;border-radius:12px;padding:14px;margin-top:14px}.otp-head{display:flex;justify-content:space-between;gap:8px;align-items:center}.otp-head>div{display:grid;gap:4px}.otp-head strong{font-size:12px;color:#4b5c6e}.otp-head small,.otp-hint{font-size:11px;color:#98a3af}.otp-request{border:1px solid #ccd9e8;background:#f5f9ff;color:#346b9f;border-radius:8px;padding:9px 12px;font-size:11px;white-space:nowrap}.otp-area>input{width:min(260px,100%);border:1px solid #ccd8e5;border-radius:9px;padding:11px 12px;margin-top:13px;letter-spacing:2px;font-weight:650}.otp-feedback{font-size:11px;color:#347258;margin:10px 0 0}.otp-hint{margin:8px 0 0}
+.result-detail-note{font-size:12px;color:#596f84;line-height:1.7;padding:12px 15px;background:#f2f6fc;border-radius:10px;overflow-wrap:anywhere}.result-error,.result-lock{font-size:12px;line-height:1.7;padding:12px 14px;border-radius:10px}.result-error{background:#fff0f1;color:#b64040}.result-lock{background:#fff5df;color:#916519}
+.technical-details{font-size:11px;color:#94a2af;padding:1px 3px}.technical-details summary{cursor:pointer;display:inline-block;font-size:11px;color:#93a4b7}.technical-details>div{padding:5px 0;overflow-wrap:anywhere}
+@media(max-width:550px){.result-card{padding:16px}.approval-card{padding:16px}.detail-grid{grid-template-columns:1fr}.approval-actions button{flex:1}.result-title{gap:8px}.result-title-side,.risk-pill{font-size:10px}.result-line{gap:8px}}
 </style>
