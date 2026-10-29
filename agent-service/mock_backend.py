@@ -21,12 +21,36 @@ _payees = [
 
 
 def reset_demo():
-    """Tests may call this between scenarios; avoid in HTTP API."""
+    """Tests may call this between sce        _orders_by_id = {}narios; avoid in HTTP API."""
     global _balances, _orders_by_key, _orders_by_id, _history
+    global _subscriptions, _cancel_orders_by_id, _cancel_orders_by_request
     with _lock:
         _balances = {1: Decimal("12580.50"), 2: Decimal("5000.00"), 3: Decimal("3000.00")}
         _orders_by_key = {}
         _orders_by_id = {}
+        # Day 6: 可变的模拟订阅数据
+        _subscriptions = [
+            {
+                "id": 1,
+                "merchantName": "视频会员",
+                "amount": "25.00",
+                "billingCycle": "MONTHLY",
+                "status": "ACTIVE",
+                "nextPayDate": "2026-11-08",
+            },
+            {
+                "id": 2,
+                "merchantName": "音乐会员",
+                "amount": "15.00",
+                "billingCycle": "MONTHLY",
+                "status": "ACTIVE",
+                "nextPayDate": "2026-11-12",
+            },
+        ]
+
+        # 独立保存模拟取消申请
+        _cancel_orders_by_id = {}
+        _cancel_orders_by_request = {}
         _history = [
             {"id": 1, "direction": "IN", "amount": "8000.00", "category": "工资", "merchantName": "公司", "occurredAt": "2026-10-03 09:00:00"},
             {"id": 2, "direction": "OUT", "amount": "35.00", "category": "餐饮", "merchantName": "美团外卖", "occurredAt": "2026-10-05 12:00:00"},
@@ -107,10 +131,8 @@ def payees(): return _payees
 
 @app.get("/api/demo/subscriptions")
 def subscriptions():
-    return [
-        {"id": 1, "merchantName": "视频会员", "amount": "25.00", "billingCycle": "MONTHLY", "status": "ACTIVE", "nextPayDate": "2026-11-08"},
-        {"id": 2, "merchantName": "音乐会员", "amount": "15.00", "billingCycle": "MONTHLY", "status": "ACTIVE", "nextPayDate": "2026-11-12"},
-    ]
+    with _lock:
+        return [dict(item) for item in _subscriptions]
 
 
 @app.get("/api/demo/analytics/monthly")
@@ -261,3 +283,258 @@ def cancel(order_id: str, data: Action, authorization: str | None = Header(defau
             raise HTTPException(409, "订单已执行或不可取消")
         order["status"] = "CANCELLED"
         return _public(order)
+
+
+# ---------- Day 6: 三阶段模拟代扣取消 ----------
+
+class SubscriptionCancelRequest(BaseModel):
+    requestId: str = Field(
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$",
+    )
+
+
+class SubscriptionCancelPrepare(SubscriptionCancelRequest):
+    subscriptionId: int = Field(gt=0)
+
+
+class SubscriptionCancelAuthorize(SubscriptionCancelRequest):
+    confirmed: bool
+
+
+def _cancel_order(oid: str):
+    order = _cancel_orders_by_id.get(oid)
+
+    if order is None:
+        raise HTTPException(404, "取消申请不存在")
+
+    return order
+
+
+def _cancel_public(order: dict):
+    sub = next(
+        s for s in _subscriptions
+        if s["id"] == order["subscriptionId"]
+    )
+
+    return {
+        "orderId": order["orderId"],
+        "subscriptionId": order["subscriptionId"],
+        "status": order["status"],
+        "subscriptionStatus": sub["status"],
+    }
+
+
+# 第一步：创建取消申请，不改变订阅状态
+@app.post("/api/subscription-cancellations/prepare")
+def cancel_subscription_prepare(
+        body: SubscriptionCancelPrepare,
+        authorization: str | None = Header(default=None),
+):
+    _auth(authorization)
+
+    with _lock:
+        previous = _cancel_orders_by_request.get(
+            body.requestId
+        )
+
+        if previous is not None:
+            if previous["subscriptionId"] != body.subscriptionId:
+                raise HTTPException(
+                    409,
+                    "同一请求编号对应不同取消目标"
+                )
+
+            return _cancel_public(previous)
+
+        sub = next(
+            (
+                s for s in _subscriptions
+                if s["id"] == body.subscriptionId
+            ),
+            None
+        )
+
+        if sub is None:
+            raise HTTPException(404, "订阅协议不存在")
+
+        if sub["status"] != "ACTIVE":
+            raise HTTPException(
+                409,
+                "订阅已非 ACTIVE 状态"
+            )
+
+        if any(
+                order["subscriptionId"] == body.subscriptionId
+                and order["status"] in (
+                        "PENDING_APPROVAL",
+                        "AUTHORIZED"
+                )
+                for order in _cancel_orders_by_id.values()
+        ):
+            raise HTTPException(
+                409,
+                "该订阅已有待处理取消申请"
+            )
+
+        order = {
+            "orderId": (
+                f"MOCK-SC-{len(_cancel_orders_by_id) + 1001}"
+            ),
+            "subscriptionId": body.subscriptionId,
+            "status": "PENDING_APPROVAL",
+            "authorizeRequestId": None,
+            "executeRequestId": None,
+        }
+
+        _cancel_orders_by_id[order["orderId"]] = order
+        _cancel_orders_by_request[body.requestId] = order
+
+        return _cancel_public(order)
+
+
+# 第二步：用户批准之后，更新申请为 AUTHORIZED
+@app.post("/api/subscription-cancellations/{order_id}/authorize")
+def cancel_subscription_authorize(
+        order_id: str,
+        body: SubscriptionCancelAuthorize,
+        authorization: str | None = Header(default=None),
+):
+    _auth(authorization)
+
+    if body.confirmed is not True:
+        raise HTTPException(
+            400,
+            "缺少用户明确确认"
+        )
+
+    with _lock:
+        order = _cancel_order(order_id)
+
+        if (
+                order["status"] == "AUTHORIZED"
+                and order["authorizeRequestId"] == body.requestId
+        ):
+            return _cancel_public(order)
+
+        if order["status"] != "PENDING_APPROVAL":
+            raise HTTPException(
+                409,
+                "取消申请当前不可授权"
+            )
+
+        order["status"] = "AUTHORIZED"
+        order["authorizeRequestId"] = body.requestId
+
+        return _cancel_public(order)
+
+
+# 第三步：执行真正的模拟取消
+@app.post("/api/subscription-cancellations/{order_id}/execute")
+def cancel_subscription_execute(
+        order_id: str,
+        body: SubscriptionCancelRequest,
+        authorization: str | None = Header(default=None),
+):
+    _auth(authorization)
+
+    with _lock:
+        order = _cancel_order(order_id)
+
+        if (
+                order["status"] == "SUCCESS"
+                and order["executeRequestId"] == body.requestId
+        ):
+            return _cancel_public(order)
+
+        if order["status"] != "AUTHORIZED":
+            raise HTTPException(
+                409,
+                "取消申请尚未授权或已完成"
+            )
+
+        sub = next(
+            s for s in _subscriptions
+            if s["id"] == order["subscriptionId"]
+        )
+
+        if sub["status"] != "ACTIVE":
+            raise HTTPException(
+                409,
+                "订阅状态已变化，请核查"
+            )
+
+        sub["status"] = "CANCELLED"
+        sub["cancelledAt"] = (
+            datetime.now(timezone.utc).isoformat()
+        )
+
+        order["status"] = "SUCCESS"
+        order["executeRequestId"] = body.requestId
+
+        return _cancel_public(order)
+
+
+# 第四个接口：只查询真实订单状态，不修改业务
+@app.get("/api/subscription-cancellations/{order_id}")
+def cancel_subscription_status(
+        order_id: str,
+        authorization: str | None = Header(default=None),
+):
+    _auth(authorization)
+
+    with _lock:
+        return _cancel_public(
+            _cancel_order(order_id)
+        )
+
+
+# Day 6 阶段 4D：拒绝取消代扣申请
+@app.post('/api/subscription-cancellations/{order_id}/reject')
+def cancel_subscription_reject(
+        order_id: str,
+        body: SubscriptionCancelRequest,
+        authorization: str | None = Header(default=None),
+):
+    _auth(authorization)
+
+    with _lock:
+        order = _cancel_order(order_id)
+
+        if (
+                order['status'] == 'REJECTED'
+                and order.get('rejectRequestId') == body.requestId
+        ):
+            return _cancel_public(order)
+
+        if order['status'] != 'PENDING_APPROVAL':
+            raise HTTPException(
+                409,
+                '只有待审批取消申请可以拒绝'
+            )
+
+        order['status'] = 'REJECTED'
+        order['rejectRequestId'] = body.requestId
+
+        # 不修改订阅状态，保持 ACTIVE
+        return _cancel_public(order)
+
+
+# Day6 4E-2: demo-only OTP issuance contract. Java issues a real time-limited
+# challenge. This legacy Mock uses the fixed DEMO_OTP, without real MFA.
+@app.post('/api/transfers/{order_id}/otp/request')
+def demo_transfer_otp_request(
+    order_id: str,
+    authorization: str | None = Header(default=None),
+):
+    _auth(authorization)
+    with _lock:
+        order = _get_order(order_id)
+        if order['status'] != 'PENDING_APPROVAL':
+            raise HTTPException(409, '只有待授权订单可以申请 OTP')
+        if _at_risk(order) == 'RED':
+            order['riskLevel'] = 'RED'
+        if order['riskLevel'] != 'RED':
+            raise HTTPException(409, 'YELLOW 风险不需要 OTP')
+        return {'orderId': order_id, 'expiresInSeconds': 120, 'status': 'MOCK_ONLY'}
