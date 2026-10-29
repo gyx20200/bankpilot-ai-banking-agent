@@ -280,6 +280,29 @@ async function demoLogin() {
   }
 }
 
+// Only for a demo session whose pending BANK orders were independently verified
+// to be in a terminal state. Never claims to finish a server-side workflow.
+function restartVerifiedLocalChat() {
+  if (busy.value) return
+  const accepted = window.confirm(
+    '请先在 Java/MySQL 核实所有相关银行订单都已结束（如取消申请为 CANCELLED、原订阅仍 ACTIVE），\n' +
+    '并确认没有 PENDING_APPROVAL、AUTHORIZED 或其他未完成的操作。\n\n' +
+    '继续只会清空当前网页的聊天和审批卡；不会撤销或完成银行订单，也不会修改 LangGraph Checkpoint。\n' +
+    '如银行订单仍未结束，请取消并先核查原订单。\n\n确定重新开始本地聊天吗？'
+  )
+  if (!accepted) return
+
+  messages.value = [{
+    id: 'welcome', role: 'assistant', intent: 'notice',
+    reply: '你好，我是 BankPilot。现在可以在同一个聊天框查询账户、分析收支、转账和取消代扣；需要改变银行状态时，我会先请你确认。',
+  }]
+  input.value = ''
+  workingThread.value = null
+  settingsOpen.value = false
+  // Keep the existing login token so harmless read-only questions work immediately.
+  // Do not alter bank data or the Python checkpoint.
+}
+
 onMounted(checkHealth)
 </script>
 
@@ -356,7 +379,19 @@ onMounted(checkHealth)
           <p>查询自动完成，涉及账户变更的操作将单独请你确认。</p>
         </div>
 
-        <div v-if="pending" class="pending-banner" role="status"><span class="pending-icon" aria-hidden="true">!</span><div><strong>有一项操作等待你的确认</strong><span>{{ pendingItem?.data?.status === 'NOT_CONFIRMED' || pendingItem?.uncertain ? '任务结果待核查，请先刷新原任务并确认银行订单状态。' : '请在当前任务卡片完成审批，再发起下一条指令。' }}</span></div></div>
+        <div v-if="pending" class="pending-banner" role="status">
+          <span class="pending-icon" aria-hidden="true">!</span>
+          <div class="pending-banner-body">
+            <strong>有一项操作等待你的确认</strong>
+            <span>{{ pendingItem?.data?.status === 'NOT_CONFIRMED' || pendingItem?.uncertain ? '任务结果待核查，请先刷新原任务并确认银行订单状态。' : '请在当前任务卡片完成审批，再发起下一条指令。' }}</span>
+            <div class="local-recovery">
+              <button type="button" class="local-recovery-button" :disabled="busy" @click="restartVerifiedLocalChat">
+                已核对银行订单，重新开始本地聊天
+              </button>
+              <small>仅清除本页聊天记录，不会修改银行订单；请先核实所有相关订单已结束。</small>
+            </div>
+          </div>
+        </div>
 
         <section class="chat bp-chat" aria-live="polite" aria-label="与 BankPilot 的对话">
           <div v-for="m in messages.filter(m => hasConversation || m.id !== 'welcome')" :key="m.id" class="msg" :class="m.role">
@@ -400,4 +435,13 @@ onMounted(checkHealth)
 
 <style scoped>
 /* Main layout is deliberately centralized in style.css to preserve original cards. */
+.pending-banner-body { min-width: 0; }
+.local-recovery { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 10px; }
+.local-recovery-button {
+  background: #fff; border: 1px solid #bfccd8; border-radius: 8px;
+  color: #25476d; font-size: 12px; padding: 7px 10px; cursor: pointer;
+}
+.local-recovery-button:hover:not(:disabled) { background: #f4f7fb; }
+.local-recovery-button:disabled { cursor: not-allowed; opacity: .5; }
+.local-recovery small { color: #64748b; font-size: 11px; line-height: 1.5; }
 </style>
