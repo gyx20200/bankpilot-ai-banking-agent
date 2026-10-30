@@ -57,7 +57,7 @@ public class TransferPrepareService {
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "requestId already used with different parameters");
             }
             return new TransferPrepareController.OrderView(e.id(), e.name(), e.accountMasked(),
-                e.amount(), e.riskLevel(), e.status());
+                e.amount(), e.riskLevel(), e.status(), e.remark());
         }
 
         var senders = jdbc.query("""
@@ -118,7 +118,7 @@ public class TransferPrepareService {
         jdbc.update("INSERT INTO audit_events(user_id,order_id,action,result,created_at) VALUES (?,?,?,?,?)",
             userId, key.getKey().longValue(), "TRANSFER_PREPARE", "PENDING_APPROVAL", Timestamp.valueOf(now));
         return new TransferPrepareController.OrderView(key.getKey().longValue(), payee.name(), payee.accountMasked(),
-            amount, risk, "PENDING_APPROVAL");
+            amount, risk, "PENDING_APPROVAL", remark);
     }
 
     private record Existing(long id, long payeeId, BigDecimal amount, String remark,
