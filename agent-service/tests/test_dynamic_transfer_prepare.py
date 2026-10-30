@@ -40,6 +40,21 @@ def setup(monkeypatch, tasks, payees=None):
         return {'month': month, 'currency': 'CNY', 'totalIncome': '0.00',
                 'totalExpense': '0.00', 'netCashFlow': '0.00', 'categories': []}
 
+    async def fake_search(token, *, name=None, phone=None):
+        assert token == TOKEN
+        events.append('registered_search')
+        choices = payees if payees is not None else [
+            {'id': 1, 'payeeName': '李四', 'payeeAccountMasked': '****5291'},
+            {'id': 2, 'payeeName': '王五', 'payeeAccountMasked': '****8806'},
+        ]
+        return [{'recipientId': p['id'], 'payeeName': p['payeeName'],
+                 'accountMasked': p.get('payeeAccountMasked', '')} for p in choices]
+
+    async def fake_confirm(recipient_id, bearer):
+        assert (recipient_id, bearer) == (1, TOKEN)
+        events.append('registered_confirm')
+        return {'id': 1, 'payeeName': '李四', 'payeeAccountMasked': '****5291'}
+
     async def fake_prepare(payee_id, amount, rid, token):
         assert (payee_id, amount, token) == (1, '200.00', TOKEN)
         assert len(rid) == 32
@@ -54,6 +69,8 @@ def setup(monkeypatch, tasks, payees=None):
     monkeypatch.setattr(flow, 'plan_tasks', fake_plan)
     monkeypatch.setitem(reads.READ_EXECUTORS, 'payees', fake_payees)
     monkeypatch.setattr(bank, 'get_monthly_analytics', fake_month)
+    monkeypatch.setattr(bank, 'search_registered_recipients', fake_search)
+    monkeypatch.setattr(bank, 'confirm_registered_recipient', fake_confirm)
     monkeypatch.setattr(bank, 'prepare_transfer', fake_prepare)
     monkeypatch.setattr(bank, 'authorize_transfer', not_allowed)
     monkeypatch.setattr(bank, 'execute_transfer', not_allowed)
@@ -85,6 +102,7 @@ def test_transfer_combinations_prepare_and_pause(monkeypatch, tasks):
     assert result['transferOrder']['status'] == 'PENDING_APPROVAL'
     assert result['transferCandidate']['id'] == 1
     assert events.count('get_payees') == 1
+    assert 'registered_search' in events and 'registered_confirm' in events
     assert len([e for e in events if isinstance(e, tuple)]) == 1
     snapshot = flow.dynamic_graph.get_state(config)
     assert snapshot.values['transferRequestId'] == result['transferRequestId']
@@ -94,16 +112,14 @@ def test_transfer_combinations_prepare_and_pause(monkeypatch, tasks):
 
 @pytest.mark.parametrize('payees,status', [
     ([], 'PAYEE_NOT_FOUND'),
-    ([{'id': 1, 'payeeName': '李四'}, {'id': 2, 'payeeName': '李四'}], 'PAYEE_AMBIGUOUS'),
-    ([{'id': '1', 'payeeName': '李四'}], 'PAYEE_INVALID'),
 ])
-def test_invalid_payee_cannot_create_order(monkeypatch, payees, status):
+def test_no_registered_recipient_cannot_create_order(monkeypatch, payees, status):
     events = setup(monkeypatch, [
         {'type': 'transfer_prepare', 'payee_name': '李四', 'amount': '200'}], payees)
     result, _ = run('给李四转200元')
     assert result['status'] == status
     assert not result.get('__interrupt__')
-    assert 'get_payees' in events
+    assert 'registered_search' in events
     assert not any(isinstance(e, tuple) for e in events)
 
 

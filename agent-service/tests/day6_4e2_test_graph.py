@@ -25,6 +25,10 @@ def scenario(monkeypatch):
         ]},date(2026,10,28),msg)
     async def payees(bearer):
         return [{'id':1,'payeeName':'李四','payeeAccountMasked':'****5291'}]
+    async def search(bearer, *, name=None, phone=None):
+        return [{'recipientId': 1, 'payeeName': '李四', 'accountMasked': '****5291'}]
+    async def confirm(recipient_id,bearer):
+        return {'id':1,'payeeName':'李四','payeeAccountMasked':'****5291'}
     async def prepare(id,amount,rid,bearer):
         events.append(('prepare',rid))
         return dict(order)
@@ -45,6 +49,8 @@ def scenario(monkeypatch):
         return dict(order)
     monkeypatch.setattr(flow,'plan_tasks',plan)
     monkeypatch.setitem(reads.READ_EXECUTORS,'payees',payees)
+    monkeypatch.setattr(bank,'search_registered_recipients',search)
+    monkeypatch.setattr(bank,'confirm_registered_recipient',confirm)
     monkeypatch.setattr(bank,'prepare_transfer',prepare)
     monkeypatch.setattr(bank,'get_order',get)
     monkeypatch.setattr(bank,'authorize_transfer',authorize)

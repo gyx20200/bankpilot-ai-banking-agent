@@ -21,6 +21,7 @@ def _checked_order(state: dict, order: dict, expected: str | None = None) -> dic
             and str(order['payeeName']).strip() == candidate['payeeName']
             and str(order['accountMasked']) == candidate['accountMasked']
             and Decimal(str(order['amount'])) == Decimal(candidate['amount'])
+            and (not candidate.get('remark') or order.get('remark') == candidate['remark'])
             and order['riskLevel'] in ('YELLOW', 'RED')
             and (expected is None or order['status'] == expected)
         )

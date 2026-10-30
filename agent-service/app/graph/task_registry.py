@@ -54,9 +54,21 @@ TASK_REGISTRY: dict[str, TaskSpec] = {
         description="创建待确认的转账订单，不执行转账",
         executor_key="transfer_prepare",
         risk_level="HIGH",
-        required_params=("payee_name", "amount"),
+        required_params=("payee_name", "payee_phone", "amount", "remark"),
         depends_on=("get_payees",),
         legacy_tool="prepare_transfer",
+    ),
+    "schedule_transfer": TaskSpec(
+        description="预约未来单次转账，固定收款人金额时间，预约时所有金额均强制OTP；到期银行自动执行",
+        executor_key="schedule_transfer",
+        risk_level="HIGH",
+        required_params=("payee_name", "payee_phone", "amount", "remark", "time_expression", "execute_at"),
+    ),
+    "create_aa_collection": TaskSpec(
+        description="准备并经发起人确认后发布AA收款请求；不会替接收人付款",
+        executor_key="aa_collection",
+        risk_level="MEDIUM",
+        required_params=("aa_participants", "aa_mode", "amount", "aa_reason"),
     ),
     "cancel_subscription": TaskSpec(
         description="申请取消指定代扣，必须经独立人工审批与银行授权",

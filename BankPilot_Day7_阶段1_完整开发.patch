@@ -1,0 +1,931 @@
+diff --git a/agent-service/app/auth_api.py b/agent-service/app/auth_api.py
+new file mode 100644
+index 0000000..8a93699
+--- /dev/null
++++ b/agent-service/app/auth_api.py
+@@ -0,0 +1,54 @@
++"""Day 7 auth gateway: only Java authenticates users and issues/revokes tokens."""
++from fastapi import APIRouter, Header, HTTPException
++from pydantic import BaseModel, Field
++from app import banking_client as bank
++
++router = APIRouter(prefix="/api/agent/auth", tags=["Auth"])
++
++
++class RegisterBody(BaseModel):
++    username: str = Field(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_]+$")
++    password: str = Field(min_length=8, max_length=128)
++    fullName: str = Field(min_length=1, max_length=50)
++    phone: str = Field(pattern=r"^1[3-9][0-9]{9}$")
++
++
++class LoginBody(BaseModel):
++    username: str = Field(min_length=1, max_length=32)
++    password: str = Field(min_length=1, max_length=128)
++
++
++def _fail(exc: bank.BankError):
++    raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
++
++
++@router.post("/register", status_code=201)
++async def register(body: RegisterBody):
++    try:
++        return await bank.register_user(body.model_dump())
++    except bank.BankError as exc:
++        _fail(exc)
++
++
++@router.post("/login")
++async def login(body: LoginBody):
++    try:
++        return await bank.login_user(body.username, body.password)
++    except bank.BankError as exc:
++        _fail(exc)
++
++
++@router.get("/me")
++async def me(authorization: str | None = Header(default=None)):
++    try:
++        return await bank.current_user(authorization)
++    except bank.BankError as exc:
++        _fail(exc)
++
++
++@router.post("/logout")
++async def logout(authorization: str | None = Header(default=None)):
++    try:
++        return await bank.logout_user(authorization)
++    except bank.BankError as exc:
++        _fail(exc)
+diff --git a/agent-service/app/banking_client.py b/agent-service/app/banking_client.py
+index 5daf0fb..88b2070 100644
+--- a/agent-service/app/banking_client.py
++++ b/agent-service/app/banking_client.py
+@@ -447,3 +447,48 @@ async def reject_subscription_cancellation(
+ 
+     return response
+ 
++
++
++# Day 7: Proposed Java API contract. Do not simulate authenticated success.
++AUTH_URL = os.getenv("BANK_AUTH_API_BASE", "http://127.0.0.1:8080/api/auth").rstrip("/")
++
++
++async def register_user(payload: dict) -> dict:
++    data = await _request("POST", f"{AUTH_URL}/register", None, payload)
++    if (not isinstance(data, dict) or type(data.get("userId")) is not int
++            or data["userId"] <= 0 or data.get("status") != "REGISTERED"):
++        raise BankError("银行注册结果格式不正确。", 502)
++    return {"userId": data["userId"], "status": "REGISTERED"}
++
++
++async def login_user(username: str, password: str) -> dict:
++    data = await _request("POST", f"{AUTH_URL}/login", None,
++                          {"username": username, "password": password})
++    if (not isinstance(data, dict) or not isinstance(data.get("token"), str)
++            or not data["token"] or data.get("tokenType") != "Bearer"
++            or type(data.get("expiresInSeconds")) is not int
++            or data["expiresInSeconds"] <= 0):
++        raise BankError("银行登录结果格式不正确。", 502)
++    if not isinstance(data.get("displayName"), str) or not data["displayName"].strip():
++        raise BankError("银行登录用户信息格式不正确。", 502)
++    return data
++
++
++async def current_user(bearer: str | None) -> dict:
++    if not bearer:
++        raise BankError("请先登录。", 401)
++    data = await _request("GET", f"{AUTH_URL}/me", bearer)
++    if (not isinstance(data, dict) or type(data.get("userId")) is not int
++            or data["userId"] <= 0 or not isinstance(data.get("displayName"), str)
++            or not data["displayName"].strip()):
++        raise BankError("银行当前用户信息格式不正确。", 502)
++    return data
++
++
++async def logout_user(bearer: str | None) -> dict:
++    if not bearer:
++        raise BankError("请先登录。", 401)
++    data = await _request("POST", f"{AUTH_URL}/logout", bearer)
++    if not isinstance(data, dict) or data.get("status") != "logged_out":
++        raise BankError("无法确认登录凭证已撤销，请检查登录状态。", 502)
++    return data
+diff --git a/agent-service/app/workflow_api.py b/agent-service/app/workflow_api.py
+index 8f6451b..2fccdad 100644
+--- a/agent-service/app/workflow_api.py
++++ b/agent-service/app/workflow_api.py
+@@ -5,7 +5,6 @@ human approval. OTP stays in runtime context, never in graph state or responses.
+ Banking backends independently enforce user ownership, risk controls and idempotency.
+ """
+ import asyncio
+-import hashlib
+ from datetime import datetime, timedelta, timezone
+ from decimal import Decimal
+ from uuid import uuid4
+@@ -20,8 +19,9 @@ from app.graph.task_planner import PlannerError
+ 
+ router = APIRouter(prefix='/api/agent/workflows', tags=['Dynamic Workflow'])
+ 
+-# Demo-only single-process session/checkpoint metadata. Real bank deployment
+-# needs a durable checkpointer and owner records keyed to Java-authenticated user.
++# Demo-only single-process session/checkpoint metadata, keyed by Java-verified
++# userId rather than bearer token. Restart loses checkpoints: bank orders remain
++# queryable through Java, but old graph threads must not be fabricated.
+ _sessions: dict[str, dict] = {}
+ _locks: dict[str, asyncio.Lock] = {}
+ _EXPIRY = timedelta(minutes=30)
+@@ -40,16 +40,26 @@ class DecisionBody(ThreadBody):
+     otpCode: str | None = Field(default=None, pattern=r'^\d{6}$')
+ 
+ 
+-def _identity(bearer: str | None) -> str:
+-    if not bearer or not bearer.startswith('Bearer ') or not bearer[7:].strip():
+-        raise HTTPException(401, '请先登录演示银行。')
+-    return hashlib.sha256(bearer.encode()).hexdigest()
++async def _authenticated_user(bearer: str | None) -> int:
++    """Resolve identity with Java on EVERY protected workflow operation.
++
++    Do not trust userId from browser, model, stale tokens or a decoded token.
++    This also rejects logged-out/expired tokens before touching a checkpoint.
++    """
++    try:
++        principal = await bank.current_user(bearer)
++    except bank.BankError as exc:
++        raise HTTPException(exc.status, str(exc)) from exc
++    user_id = principal.get('userId')
++    if type(user_id) is not int or user_id <= 0:
++        raise HTTPException(502, '银行认证身份缺失，不能执行工作流。')
++    return user_id
+ 
+ 
+-def _owner(thread: str, bearer: str | None) -> dict:
+-    owner = _identity(bearer)
++async def _owner(thread: str, bearer: str | None) -> dict:
++    user_id = await _authenticated_user(bearer)
+     rec = _sessions.get(thread)
+-    if not rec or rec['owner'] != owner:
++    if not rec or rec.get('ownerUserId') != user_id:
+         raise HTTPException(403, '任务不存在或不属于当前用户。')
+     if datetime.now(timezone.utc) > rec['expires']:
+         raise HTTPException(410, '任务已过期，请查询原银行订单状态，勿盲目重复操作。')
+@@ -108,7 +118,7 @@ def _read_bank_order_matches(state: dict, remote: dict) -> None:
+ 
+ @router.post('/dynamic/start')
+ async def dynamic_start(body: StartBody, authorization: str | None = Header(default=None)):
+-    owner = _identity(authorization)
++    owner_user_id = await _authenticated_user(authorization)
+     thread = str(uuid4())
+     try:
+         state = await dynamic_graph.ainvoke({'message': body.message}, _config(thread),
+@@ -120,7 +130,7 @@ async def dynamic_start(body: StartBody, authorization: str | None = Header(defa
+     paused = bool(state.get('__interrupt__'))
+     view = _view(thread, state, paused)
+     if paused:
+-        _sessions[thread] = {'owner': owner, 'expires': datetime.now(timezone.utc) + _EXPIRY,
++        _sessions[thread] = {'ownerUserId': owner_user_id, 'expires': datetime.now(timezone.utc) + _EXPIRY,
+                              'finished': False, 'decision': None, 'last': view}
+         _locks[thread] = asyncio.Lock()
+     return view
+@@ -149,7 +159,7 @@ def _bank_verified_user_rejection(snapshot, state: dict, order: dict) -> bool:
+ 
+ @router.get('/dynamic/{thread_id}')
+ async def dynamic_status(thread_id: str, authorization: str | None = Header(default=None)):
+-    record = _owner(thread_id, authorization)
++    record = await _owner(thread_id, authorization)
+     if record['finished']:
+         return record['last']
+     # Read-only recovery: never calls a bank write endpoint.
+@@ -193,7 +203,7 @@ async def dynamic_status(thread_id: str, authorization: str | None = Header(defa
+ 
+ @router.post('/dynamic/transfer/otp/request')
+ async def request_transfer_otp(body: ThreadBody, authorization: str | None = Header(default=None)):
+-    record = _owner(body.threadId, authorization)
++    record = await _owner(body.threadId, authorization)
+     async with _locks[body.threadId]:
+         if record['finished']:
+             raise HTTPException(409, '任务已结束，不得重新申请 OTP。')
+@@ -216,7 +226,7 @@ async def request_transfer_otp(body: ThreadBody, authorization: str | None = Hea
+ 
+ @router.post('/dynamic/resume')
+ async def dynamic_resume(body: DecisionBody, authorization: str | None = Header(default=None)):
+-    record = _owner(body.threadId, authorization)
++    record = await _owner(body.threadId, authorization)
+     async with _locks[body.threadId]:
+         if record['finished']:
+             if record['decision'] != body.approved:
+diff --git a/agent-service/main.py b/agent-service/main.py
+index 28a96ec..6616fe4 100644
+--- a/agent-service/main.py
++++ b/agent-service/main.py
+@@ -16,10 +16,12 @@ from app import llm_router
+ from app.transfer_parser import parse_transfer, normalize_amount
+ from app import banking_client as bank
+ from app.workflow_api import router as workflow_router
++from app.auth_api import router as auth_router
+ from datetime import datetime, timedelta, timezone
+ 
+ app = FastAPI(title="BankPilot Agent Day 6", version="0.6.0")
+ app.include_router(workflow_router)
++app.include_router(auth_router)
+ 
+ 
+ class DemoLoginRequest(BaseModel):
+diff --git a/agent-service/tests/test_day7_auth_proxy.py b/agent-service/tests/test_day7_auth_proxy.py
+new file mode 100644
+index 0000000..f7de658
+--- /dev/null
++++ b/agent-service/tests/test_day7_auth_proxy.py
+@@ -0,0 +1,60 @@
++"""Day 7 auth proxy contract tests; no Java service required."""
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++from app.auth_api import router
++from app import banking_client as bank
++
++
++def test_auth_proxy_contract(monkeypatch):
++    requests = []
++
++    async def fake_request(method, url, bearer=None, data=None):
++        requests.append((method, url, bearer, data))
++        if url.endswith('/register'):
++            return {'userId': 3, 'status': 'REGISTERED'}
++        if url.endswith('/login'):
++            return {'token': 'fake-only-for-test', 'tokenType': 'Bearer',
++                    'expiresInSeconds': 1800, 'displayName': '张三'}
++        if url.endswith('/me'):
++            return {'userId': 3, 'username': 'zhangsan',
++                    'displayName': '张三', 'phoneMasked': '138****8000'}
++        if url.endswith('/logout'):
++            return {'status': 'logged_out'}
++        raise AssertionError(url)
++
++    monkeypatch.setattr(bank, '_request', fake_request)
++    app = FastAPI()
++    app.include_router(router)
++    client = TestClient(app)
++
++    res = client.post('/api/agent/auth/register', json={
++        'username': 'zhangsan', 'password': 'TestPassword123!',
++        'fullName': '张三', 'phone': '13800138000',
++    })
++    assert res.status_code == 201
++    assert res.json() == {'userId': 3, 'status': 'REGISTERED'}
++    assert requests[0][3]['password'] == 'TestPassword123!'
++
++    res = client.post('/api/agent/auth/login', json={
++        'username': 'zhangsan', 'password': 'TestPassword123!',
++    })
++    assert res.status_code == 200
++    assert res.json()['tokenType'] == 'Bearer'
++
++    res = client.get('/api/agent/auth/me',
++                     headers={'Authorization': 'Bearer fake-only-for-test'})
++    assert res.status_code == 200
++    assert res.json()['userId'] == 3
++    assert requests[2][2] == 'Bearer fake-only-for-test'
++
++    res = client.post('/api/agent/auth/logout',
++                      headers={'Authorization': 'Bearer fake-only-for-test'})
++    assert res.status_code == 200
++    assert res.json()['status'] == 'logged_out'
++    assert requests[3][2] == 'Bearer fake-only-for-test'
++
++    assert client.get('/api/agent/auth/me').status_code == 401
++    assert client.post('/api/agent/auth/register', json={
++        'username': 'x', 'password': '123', 'fullName': '张三', 'phone': 'wrong',
++    }).status_code == 422
++    assert len(requests) == 4
+diff --git a/agent-service/tests/test_day7_auth_safety.py b/agent-service/tests/test_day7_auth_safety.py
+new file mode 100644
+index 0000000..31efb80
+--- /dev/null
++++ b/agent-service/tests/test_day7_auth_safety.py
+@@ -0,0 +1,32 @@
++"""Day 7 auth edge cases: Java is authoritative, no fabricated login success."""
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++from app import banking_client as bank
++from app.auth_api import router
++
++
++def test_auth_invalid_java_payload_and_logout_failure(monkeypatch):
++    app = FastAPI(); app.include_router(router)
++    client = TestClient(app)
++    async def invalid_login(method, url, bearer=None, data=None):
++        return {'tokenType': 'Bearer', 'expiresInSeconds': 1800} # no token
++    monkeypatch.setattr(bank, '_request', invalid_login)
++    res = client.post('/api/agent/auth/login', json={'username':'zhangsan','password':'passpass123'})
++    assert res.status_code == 502
++    async def invalid_logout(method, url, bearer=None, data=None):
++        return {'status': 'not_logged_out'}
++    monkeypatch.setattr(bank, '_request', invalid_logout)
++    assert client.post('/api/agent/auth/logout',headers={'Authorization':'Bearer example'}).status_code == 502
++
++
++def test_auth_no_password_logs_no_trusting_username_as_identity(monkeypatch):
++    app = FastAPI(); app.include_router(router)
++    client = TestClient(app)
++    async def rejected(method, url, bearer=None, data=None):
++        raise bank.BankError('账号或密码错误。', 401)
++    monkeypatch.setattr(bank, '_request', rejected)
++    res = client.post('/api/agent/auth/login',json={'username':'zhangsan','password':'secret-pass-123'})
++    assert res.status_code == 401
++    assert 'secret-pass-123' not in res.text
++    assert client.post('/api/agent/auth/logout').status_code == 401
++    assert client.get('/api/agent/auth/me').status_code == 401
+diff --git a/agent-service/tests/test_day7_workflow_identity.py b/agent-service/tests/test_day7_workflow_identity.py
+new file mode 100644
+index 0000000..14c7863
+--- /dev/null
++++ b/agent-service/tests/test_day7_workflow_identity.py
+@@ -0,0 +1,91 @@
++"""Stage 1 identity regression without requiring a running Java/LLM/LangGraph.
++
++The real dynamic graph is replaced ONLY inside this unit test. This verifies
++FastAPI authorization guards; it is not an end-to-end graph regression.
++"""
++import importlib.util
++import sys
++import types
++from pathlib import Path
++
++from fastapi import FastAPI
++from fastapi.testclient import TestClient
++from app import banking_client as bank
++
++
++def _load_workflow_api(monkeypatch):
++    # isolate native LangGraph imports; test only the changed HTTP owner checks
++    stub_langgraph = types.ModuleType('langgraph')
++    stub_types = types.ModuleType('langgraph.types')
++    stub_types.Command = lambda **kwargs: kwargs
++    stub_graph = types.ModuleType('app.graph.dynamic_cancellation_workflow')
++
++    class DummyGraph:
++        async def ainvoke(self, *args, **kwargs):
++            return {
++                '__interrupt__': [{'value': 'waiting'}],
++                'status': 'WAITING_APPROVAL', 'plan': {'tasks': []},
++            }
++
++        async def aget_state(self, config):
++            return types.SimpleNamespace(values={}, next=('wait_for_approval',))
++
++    stub_graph.dynamic_graph = DummyGraph()
++    monkeypatch.setitem(sys.modules, 'langgraph', stub_langgraph)
++    monkeypatch.setitem(sys.modules, 'langgraph.types', stub_types)
++    monkeypatch.setitem(sys.modules, 'app.graph.dynamic_cancellation_workflow', stub_graph)
++    path = Path(__file__).resolve().parents[1] / 'app' / 'workflow_api.py'
++    spec = importlib.util.spec_from_file_location('bankpilot_day7_workflow_test_module', path)
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++def test_workflow_userid_ownership_and_revocation(monkeypatch):
++    workflow = _load_workflow_api(monkeypatch)
++    identities = {'Bearer token-A': 1, 'Bearer token-B': 1, 'Bearer token-C': 2}
++
++    async def java_me(bearer):
++        if bearer not in identities:
++            raise bank.BankError('登录状态无效，请重新登录。', 401)
++        return {'userId': identities[bearer], 'displayName': '张小明' if identities[bearer] == 1 else '张三'}
++
++    monkeypatch.setattr(workflow.bank, 'current_user', java_me)
++    app = FastAPI()
++    app.include_router(workflow.router)
++    client = TestClient(app)
++
++    assert client.post('/api/agent/workflows/dynamic/start', json={'message': '查余额'}).status_code == 401
++    started = client.post('/api/agent/workflows/dynamic/start', json={'message': '取消订阅'},
++                          headers={'Authorization': 'Bearer token-A'})
++    assert started.status_code == 200
++    tid = started.json()['threadId']
++    assert workflow._sessions[tid]['ownerUserId'] == 1
++    assert 'owner' not in workflow._sessions[tid]
++
++    # Same verified bank user can inspect an old thread with a NEW login token.
++    workflow._sessions[tid]['finished'] = True
++    assert client.get(f'/api/agent/workflows/dynamic/{tid}',
++                      headers={'Authorization': 'Bearer token-B'}).status_code == 200
++    # Different bank user must never inspect or operate the saved workflow.
++    assert client.get(f'/api/agent/workflows/dynamic/{tid}',
++                      headers={'Authorization': 'Bearer token-C'}).status_code == 403
++    assert client.post('/api/agent/workflows/dynamic/resume', json={'threadId': tid, 'approved': True},
++                       headers={'Authorization': 'Bearer token-C'}).status_code == 403
++    assert client.post('/api/agent/workflows/dynamic/transfer/otp/request', json={'threadId': tid},
++                       headers={'Authorization': 'Bearer token-C'}).status_code == 403
++    # Revoked/expired login must be rejected even when threadId is known.
++    del identities['Bearer token-A']
++    assert client.get(f'/api/agent/workflows/dynamic/{tid}',
++                      headers={'Authorization': 'Bearer token-A'}).status_code == 401
++
++
++def test_workflow_does_not_trust_fake_user_id(monkeypatch):
++    workflow = _load_workflow_api(monkeypatch)
++    async def invalid_principal(token):
++        return {'userId': '1', 'displayName': 'not trusted'}
++    monkeypatch.setattr(workflow.bank, 'current_user', invalid_principal)
++    app = FastAPI(); app.include_router(workflow.router)
++    res = TestClient(app).post('/api/agent/workflows/dynamic/start', json={'message': '查余额'},
++                               headers={'Authorization': 'Bearer any'})
++    assert res.status_code == 502
+diff --git a/docs/DAY7-STAGE1-AUTH-HANDOFF.md b/docs/DAY7-STAGE1-AUTH-HANDOFF.md
+new file mode 100644
+index 0000000..b958df3
+--- /dev/null
++++ b/docs/DAY7-STAGE1-AUTH-HANDOFF.md
+@@ -0,0 +1,109 @@
++# BankPilot Day 7 · 阶段 1（Agent + Vue）开发交接说明
++
++> 交付范围：FastAPI 多用户认证代理、Vue 注册/登录/退出、当前用户显示及账户切换清理、LangGraph 用户归属。**未实现 Java/MySQL 身份服务**。本说明描述本次交付的增量代码，不修改旧 Java 业务。
++
++## 1. 源码基线与应用条件
++
++- 源码基于此前上传的 **`bankpilot-project.zip`**（Day 6 联调版，ZIP 中 `.git/HEAD` 为 `main`，ZIP 中 `.git/refs/heads/main` 为 `43953bb6ca008afbc2b978eb58bf169ebed66ef3`）。
++- **请以 ZIP 中的实际工作树文件为准**：压缩包内 Git HEAD 不保证 ZIP 工作树没有未提交改动。
++- 用户本地应在 `feature/day7-agent` 分支、且**尚未应用先前单独的“阶段 1.1 认证补丁”**时应用本交付补丁；本补丁**已包含 1.1**，不能重复叠加。
++- 环境要求：Python 3.11+（按 `agent-service/requirements.txt` 安装）；Node.js 20+，前端按锁文件执行 `npm ci`。Java 必须提供本文件第 3 节所列接口。
++- 代码补丁是**项目根目录相对路径**，即在同时含有 `agent-service/` 和 `frontend/` 的目录运行 `git apply`。
++
++## 2. 修改文件及业务原因
++
++| 文件 | 类型 | 修改原因及行为 |
++|---|---|---|
++| `agent-service/app/auth_api.py` | 新增 | `/api/agent/auth/register/login/me/logout`；参数校验后转发 Java；不创建假用户或 Token。 |
++| `agent-service/app/banking_client.py` | 扩展 | Java 认证端点客户端与必要的返回字段校验；保留 Day 6 资金、查询、订阅 API。 |
++| `agent-service/main.py` | 轻微修改 | 注册新的认证路由；**保留** `/api/agent/auth/demo-login` 兼容入口。 |
++| `agent-service/app/workflow_api.py` | 安全修改 | 每次 start/status/otp/resume 均调用 Java `/api/auth/me` 验证令牌；会话归属由 Token 哈希换为 Java 认证 `userId`；同一用户换 Token 仍可按旧 `threadId` 检查，同名/不同用户不能接管。原审批/授权/执行节点不变。 |
++| `frontend/src/components/AuthPanel.vue` | 新增 | 注册/登录表单、二次密码确认、字段校验，不在页面暴露 Token 输入；注册成功后切回登录。 |
++| `frontend/src/App.vue` | 修改 | 注册登录状态、`/me` 再确认身份、当前用户名称、退出 Java Token 撤销、401 清理前端状态、隐藏未登录聊天；同时保留现有聊天和审批卡。 |
++| `frontend/src/style.css` | 附加 | 注册登录及当前用户区域样式，不替换旧卡片样式。 |
++| `agent-service/tests/test_day7_auth_proxy.py` | 新增 | 四种认证代理、请求字段、基础错误输入测试。 |
++| `agent-service/tests/test_day7_auth_safety.py` | 新增 | 无效 Java 响应、撤销结果不明确、无凭证和登录失败。 |
++| `agent-service/tests/test_day7_workflow_identity.py` | 新增 | 使用隔离的假图只测试 HTTP 身份保护：同一 userId 不同 Token 允许、不同 userId 拒绝、撤销 Token 拒绝。不是完整图集成测试。 |
++
++**明确不修改：** Task Planner、Task Registry、LangGraph 图节点、普通转账金额/风控规则、订阅取消行为、Java/MySQL 数据库。
++
++## 3. Java 队友必须实现的认证契约（新增，当前旧 Java 不具备全部接口）
++
++| Java URL | 方法 | 请求与返回约定 |
++|---|---|---|
++| `/api/auth/register` | POST | `{"username":"zhangsan","password":"TestPassword123!","fullName":"张三","phone":"13800138000"}` → `{"status":"REGISTERED","userId":3}`。Java 在同一事务中建用户与**唯一账户**，初始余额 ¥10,000。**不得返回 Token**。 |
++| `/api/auth/login` | POST | `{"username":"zhangsan","password":"TestPassword123!"}` → `{"token":"...","tokenType":"Bearer","expiresInSeconds":1800,"displayName":"张三"}`。用户身份由 Java 账号密码验证后签发。 |
++| `/api/auth/me` | GET | `Authorization: Bearer ...` → `{"userId":3,"username":"zhangsan","displayName":"张三","phoneMasked":"138****8000"}`。必须检查 Token 是否已撤销/过期并返回 `401`。 |
++| `/api/auth/logout` | POST | `Authorization: Bearer ...` → `{"status":"logged_out"}`。**Java 必须撤销 Token**；用同一 Token 调 `/me` 返回 `401`。 |
++
++FastAPI 对 Vue 暴露同名逻辑的接口，统一加 `/api/agent/auth/` 前缀。
++
++- 当前 Day 6 Java **仅实现** `/api/auth/demo-login` 和 `/api/auth/logout`。队友须新增 `register`、`login`、`me`，才可以完成真实多用户端到端联调。
++- 用 Java Token 识别当前用户，不能相信前端/LLM 的 `userId`，必须按用户隔离余额、流水、账单、常用收款人、订阅、订单和审批。
++- 用户名 `[A-Za-z0-9_]{3,32}`；密码 8～128 个字符；手机号 11 位中国大陆格式且唯一；姓名 1～50 字符允许重名；用户名不重复；注册不自动登录。
++- 认证错误应使用准确 HTTP 状态：未认证 `401`、无权限 `403`、重复用户名或手机号 `409`、非法输入 `400/422`，登录错误不能泄露账户是否存在。
++- 原 `demo-login` **保留用于历史测试**。但新 LangGraph 身份校验**要求 `/me`**；在旧 Java 未提供 `/me` 时，即使通过 `demo-login` 拿到 Token，也不能启动新的受保护工作流。这是安全优先的兼容边界，不能靠 Agent 猜用户 ID 规避。
++
++## 4. 交互流程及异常约定
++
++### 注册
++
++用户进入注册页 → Vue 校验表单 → FastAPI 转发 Java → Java 成功创建账户 → Vue 显示“注册成功，请登录”；**不会自动登录**、不会从注册响应获得 Token。
++
++### 登录
++
++用户填写账号和密码 → FastAPI → Java 签发 Token → Vue 携刚获得的 Token 再调用 `/me` → 确认 `userId` 为有效正整数 → 在内存中保存 Token 和当前用户 → 显示原聊天工作台。若 `/me` 失败，不进入工作台。
++
++### 退出
++
++Vue 调 FastAPI `/logout` → Java 撤销 Token → 返回 `logged_out` 后 Vue 清理 Token、当前用户、聊天、审批卡、OTP 消息等私人 UI。**不对旧 Java 银行订单调用取消**。若银行退出失败，不谎称已完成服务端撤销，保留页面会话并提示重试。若 Token 已过期并收到 `401`，本地会话失效，需要重新登录。
++
++### 会话与审批归属
++
++Token 仅存在于 Vue 组件内存，刷新网页须重新登录。`workflow_api.py` 每次敏感工作流操作调用 Java `/me` 并检查 `userId` 与会话记录一致。退出再登录同一用户，若还持有 `threadId` 且 Python 进程中的检查点仍在 30 分钟窗口，可继续验证并处理该任务。**页面不会持久化或自动找回旧 `threadId`**；如果需要跨刷新找回未完成银行订单，须后续通过 Java 订单列表/状态功能单独实现，不能伪造内存检查点。
++
++## 5. 测试记录（本次交付环境）
++
++- `python -m pytest -q tests/test_day7_auth_proxy.py tests/test_day7_auth_safety.py tests/test_day7_workflow_identity.py` → **5 passed**。其中工作流身份测试采用受控假图，不等价于真实 LangGraph 运行。
++- `python -m pytest -q tests/test_transfer_parser.py tests/test_task_planner.py tests/test_task_registry.py tests/test_mock_backend.py tests/test_mock_subscription_cancellation.py` → **69 passed**，验证未直接修改的核心旧功能单元测试。
++- 对 `App.vue` 与 `AuthPanel.vue` 进行了 Vue SFC 解析、script 编译和 template 编译检查：**无编译错误**。
++- Python `compileall`：通过。
++- **尚未完成完整端到端联调**：当前没有 Day 7 Java 认证服务；本次 Linux 验证环境没有 LangGraph 包且无法联网安装；用户 ZIP 中的 Node_modules 为 Windows Rollup 原生二进制，无法在 Linux 完整运行 Vite 打包。需在你本地按下述步骤验证。
++
++## 6. 如何安全应用
++
++在项目根目录（你的 `feature/day7-agent` 分支）运行：
++
++```bash
++git branch --show-current
++git status --short
++git apply --check BankPilot_Day7_阶段1_完整开发.patch
++git apply BankPilot_Day7_阶段1_完整开发.patch
++```
++
++先看 `git apply --check`，若提示文件不匹配，**不要强行应用**：检查是否使用了不同版本的 Day 6 ZIP，或者之前已应用阶段 1.1 补丁。
++
++在你的本地环境中执行：
++
++```bash
++cd agent-service
++python -m pip install -r requirements.txt
++python -m pytest -q tests/test_day7_auth_proxy.py tests/test_day7_auth_safety.py tests/test_day7_workflow_identity.py
++python -m pytest -q tests
++
++cd ../frontend
++npm ci
++npm run build
++npm run dev
++```
++
++由于目前 Java 尚未提供 Day 7 新接口，新 UI 真实登录失败属于**待 Java 联调**，不属于假数据可修复问题。待 Java 完成后依次验收：两位用户注册→分别登录→余额/订阅隔离→A 登出 B 登录→B 不能恢复 A 的工作流→旧转账审批/订阅取消回归。
++
++## 7. 安全与已知边界
++
++- 本阶段没有在浏览器的 `localStorage`/`sessionStorage` 中保存 Token、密码或 OTP，也没有引入新的模型调用来认证。
++- Vue `busy` 时禁用退出，避免用户在审批提交中途切换身份；登录有效性由 Java `/me` 再确认。
++- Java/MySQL 必须独立保护**所有**读取、资金写入与订单状态接口。Python 按 `userId` 绑定工作流是第二道防线，不替代 Java。
++- 当前 LangGraph 会话和检查点仍是**内存状态**，服务重启不可直接恢复；原有工作流会话 30 分钟 TTL 沿用 Day 6。
++- 新 UI 不提供 Mock/手填 Token；旧的后端 `demo-login` 和 `mock_backend.py` 保留用于自动化测试。新 UI 必须连接实现新版身份接口的 Java 服务才能真实使用。
++- 登出失败时不删除服务器 Token，也不误报成功；当用户通过刷新浏览器丢失内存 Token 时，服务端原 Token 可能在到期前仍有效，直到 Java 清理。这是已选择的“Token 仅内存”模式的自然边界。
+diff --git a/frontend/src/App.vue b/frontend/src/App.vue
+index 33ecbd2..14d4d2d 100644
+--- a/frontend/src/App.vue
++++ b/frontend/src/App.vue
+@@ -1,12 +1,14 @@
+ <script setup>
+ import { computed, nextTick, onMounted, ref } from 'vue'
+ import DynamicWorkflowCard from './components/DynamicWorkflowCard.vue'
++import AuthPanel from './components/AuthPanel.vue'
+ 
+ // Day 6 4G: one input -> dynamic planner -> LangGraph -> bank. No direct Java call.
+ const input = ref('')
+-const token = ref('') // Demo only. Never stored in localStorage/sessionStorage.
+-const loginPassword = ref('')
+-const loginMessage = ref('')
++const token = ref('') // Memory only. Never write to localStorage/sessionStorage.
++const currentUser = ref(null)
++const authMode = ref('login')
++const authNotice = ref('')
+ const bankMode = ref('java')
+ const modelName = ref('')
+ const modelConfigured = ref(false)
+@@ -35,20 +37,21 @@ const pending = computed(() => messages.value.some(needsAttention))
+ const pendingItem = computed(() => messages.value.find(needsAttention))
+ const hasConversation = computed(() => messages.value.some(m => m.role === 'user'))
+ const settingsOpen = ref(false)
+-const isAuthenticated = computed(() => Boolean(token.value.trim()))
++const isAuthenticated = computed(() => Boolean(token.value.trim() && currentUser.value?.userId))
+ 
+-function headers() {
++function headers(overrideToken = undefined) {
+   const h = { 'Content-Type': 'application/json; charset=utf-8' }
+-  if (token.value.trim()) h.Authorization = `Bearer ${token.value.trim()}`
++  const activeToken = overrideToken === undefined ? token.value : overrideToken
++  if (activeToken?.trim()) h.Authorization = `Bearer ${activeToken.trim()}`
+   return h
+ }
+ 
+-async function req(path, method = 'GET', payload = undefined, timeoutMs = 90000) {
++async function req(path, method = 'GET', payload = undefined, timeoutMs = 90000, overrideToken = undefined) {
+   const controller = new AbortController()
+   const timer = setTimeout(() => controller.abort(), timeoutMs)
+   try {
+     const response = await fetch(path, {
+-      method, headers: headers(),
++      method, headers: headers(overrideToken),
+       body: payload === undefined ? undefined : JSON.stringify(payload),
+       signal: controller.signal,
+     })
+@@ -58,6 +61,11 @@ async function req(path, method = 'GET', payload = undefined, timeoutMs = 90000)
+       const msg = typeof detail === 'string' ? detail : (detail ? JSON.stringify(detail) : `HTTP ${response.status}`)
+       const error = new Error(msg)
+       error.httpStatus = response.status
++      // Session has expired/revoked. A new login must be Java-verified.
++      if (response.status === 401 && overrideToken === undefined && token.value.trim() &&
++          !['/api/agent/auth/login', '/api/agent/auth/register'].includes(path)) {
++        resetSession('登录状态已失效，请重新登录。')
++      }
+       throw error
+     }
+     return body
+@@ -118,10 +126,74 @@ async function checkHealth() {
+   }
+ }
+ 
+-function useMockToken() {
+-  token.value = 'mock-day4-token'
++function resetSession(message = '') {
++  token.value = ''
++  currentUser.value = null
++  input.value = ''
++  messages.value = [{
++    id: 'welcome', role: 'assistant', intent: 'notice',
++    reply: '你好，我是 BankPilot。登录后可以查询账户、分析收支、转账和管理代扣。',
++  }]
++  workingThread.value = null
+   settingsOpen.value = false
+-  loginMessage.value = '已连接 Mock 演示账户'
++  authMode.value = 'login'
++  authNotice.value = message
++  // Clearing the browser UI does not modify any Java bank order.
++}
++
++function changeAuthMode(mode) {
++  authMode.value = mode
++  authNotice.value = ''
++}
++
++async function registerUser(fields) {
++  if (busy.value || isAuthenticated.value) return
++  busy.value = true
++  authNotice.value = ''
++  try {
++    await req('/api/agent/auth/register', 'POST', fields, 20000)
++    authMode.value = 'login'
++    authNotice.value = '注册成功。请使用刚才设置的用户名和密码登录；注册不会自动登录。'
++  } catch (e) {
++    authNotice.value = `注册失败：${e.message}`
++  } finally {
++    busy.value = false
++  }
++}
++
++async function loginUser(fields) {
++  if (busy.value || isAuthenticated.value) return
++  busy.value = true
++  authNotice.value = ''
++  try {
++    const login = await req('/api/agent/auth/login', 'POST', fields, 20000)
++    if (typeof login.token !== 'string' || !login.token.trim()) throw new Error('银行没有返回登录凭证。')
++    // Trust Java /me, not a browser-supplied userId or displayName.
++    const identity = await req('/api/agent/auth/me', 'GET', undefined, 20000, login.token)
++    if (!Number.isSafeInteger(identity.userId) || identity.userId <= 0) throw new Error('银行认证身份无效。')
++    resetSession()
++    token.value = login.token
++    currentUser.value = identity
++  } catch (e) {
++    authNotice.value = `登录失败：${e.message}`
++  } finally {
++    busy.value = false
++  }
++}
++
++async function logoutUser() {
++  if (busy.value || !isAuthenticated.value) return
++  busy.value = true
++  authNotice.value = ''
++  try {
++    // Java must revoke the server token; do not claim logout on failed revoke.
++    await req('/api/agent/auth/logout', 'POST', undefined, 20000)
++    resetSession('已安全退出银行账户。')
++  } catch (e) {
++    if (isAuthenticated.value) authNotice.value = `银行未确认退出：${e.message}。请重试退出。`
++  } finally {
++    busy.value = false
++  }
+ }
+ 
+ function fillExample(example) {
+@@ -139,7 +211,7 @@ async function send() {
+     return
+   }
+   if (!token.value.trim()) {
+-    pushAssistant('请先在顶部填写登录 Token，Mock 模式可使用“填入 Mock 测试令牌”。')
++    pushAssistant('请先登录银行账户。')
+     await scroll()
+     return
+   }
+@@ -263,23 +335,6 @@ async function requestOtp(threadId) {
+   }
+ }
+ 
+-async function demoLogin() {
+-  if (busy.value || !loginPassword.value) return
+-  busy.value = true
+-  loginMessage.value = ''
+-  try {
+-    const result = await req('/api/agent/auth/demo-login', 'POST', { password: loginPassword.value }, 20000)
+-    token.value = result.token
+-    settingsOpen.value = false
+-    loginMessage.value = `已登录：${result.displayName || '演示账户'}`
+-  } catch (e) {
+-    loginMessage.value = `登录失败：${e.message}`
+-  } finally {
+-    loginPassword.value = ''
+-    busy.value = false
+-  }
+-}
+-
+ // Only for a demo session whose pending BANK orders were independently verified
+ // to be in a terminal state. Never claims to finish a server-side workflow.
+ function restartVerifiedLocalChat() {
+@@ -324,7 +379,7 @@ onMounted(checkHealth)
+         <span class="sidebar-capability-label">你的智能银行助手</span>
+         <p>账户查询、收支分析、模拟转账与代扣管理，都可以用一句话完成。</p>
+       </div>
+-      <div class="sidebar-bottom"><span class="small-led"></span> BANKPILOT DEMO <span class="sidebar-version">DAY 06</span></div>
++      <div class="sidebar-bottom"><span class="small-led"></span> BANKPILOT DEMO <span class="sidebar-version">DAY 07</span></div>
+     </aside>
+ 
+     <main class="bp-main">
+@@ -335,30 +390,28 @@ onMounted(checkHealth)
+         </div>
+         <div class="header-actions">
+           <span class="service-state" :class="connected ? 'online' : 'offline'"><span class="status-led"></span>{{ connected ? '服务已连接' : '连接未就绪' }}</span>
+-          <button type="button" class="settings-trigger" :class="{ 'settings-trigger-open': settingsOpen }" :aria-expanded="settingsOpen" aria-controls="bank-settings" @click="settingsOpen = !settingsOpen">
++          <span v-if="isAuthenticated" class="current-user">当前用户：{{ currentUser.displayName }}</span>
++          <button v-if="isAuthenticated" type="button" class="settings-trigger" :class="{ 'settings-trigger-open': settingsOpen }" :aria-expanded="settingsOpen" aria-controls="bank-settings" @click="settingsOpen = !settingsOpen">
+             <span class="settings-symbol" aria-hidden="true">⚙</span> 连接设置
+             <span class="settings-caret" aria-hidden="true">⌄</span>
+           </button>
++          <button v-if="isAuthenticated" type="button" class="logout-trigger" :disabled="busy" @click="logoutUser">退出登录</button>
+         </div>
+       </header>
+ 
+-      <section v-if="settingsOpen" id="bank-settings" class="connection-drawer" aria-label="银行连接设置">
+-        <div class="connection-intro"><div><strong>连接与演示账户</strong><p>仅用于本地演示，凭证不会持久化保存在浏览器中。</p></div><button class="close-connection" type="button" aria-label="关闭连接设置" @click="settingsOpen = false">×</button></div>
++      <section v-if="isAuthenticated && settingsOpen" id="bank-settings" class="connection-drawer" aria-label="银行连接设置">
++        <div class="connection-intro"><div><strong>银行连接状态</strong><p>当前用户：{{ currentUser.displayName }}。登录凭证仅保存在本次页面内存。</p></div><button class="close-connection" type="button" aria-label="关闭连接设置" @click="settingsOpen = false">×</button></div>
+         <div class="connection-status"><span class="connection-chip">{{ bankMode === 'mock' ? 'Mock 模拟银行' : 'Java 银行服务' }}</span><span class="connection-chip">{{ modelConfigured ? (modelName || 'AI 已配置') : 'AI 配置待检查' }}</span></div>
+-        <div v-if="bankMode === 'java'" class="connection-row">
+-          <input v-model="loginPassword" :disabled="busy" type="password" autocomplete="current-password" placeholder="演示银行登录密码" aria-label="演示银行登录密码" />
+-          <button type="button" :disabled="busy || !loginPassword" @click="demoLogin">登录</button>
+-        </div>
+-        <div class="connection-row">
+-          <input v-model="token" :disabled="busy || pending" type="password" autocomplete="off" placeholder="登录 Token（不含 Bearer）" aria-label="银行演示登录令牌" />
+-          <button v-if="bankMode === 'mock'" type="button" :disabled="busy || pending" @click="useMockToken">使用 Mock 账户</button>
+-          <button type="button" class="connection-recheck" :disabled="busy" @click="checkHealth">检查连接</button>
+-        </div>
+-        <p v-if="loginMessage" class="connection-message">{{ loginMessage }}</p>
+-        <p class="connection-footnote">若页面刷新或 Agent 重启，内存中尚未完成的审批可能无法恢复；不要盲目重复发起资金类业务。</p>
++        <div class="connection-row"><button type="button" class="connection-recheck" :disabled="busy" @click="checkHealth">检查连接</button></div>
++        <p class="connection-footnote">页面刷新后需重新登录。退出不会自动取消 Java 中已有的银行订单或预约；若 Agent 重启，旧内存审批任务可能无法恢复。</p>
+       </section>
+ 
+-      <section class="bp-content">
++      <section v-if="!isAuthenticated" class="bp-content auth-content">
++        <AuthPanel :mode="authMode" :busy="busy" :notice="authNotice"
++                   @mode-change="changeAuthMode" @login="loginUser" @register="registerUser" />
++      </section>
++      <section v-else class="bp-content">
++        <p v-if="authNotice" class="session-notice" role="alert">{{ authNotice }}</p>
+         <div v-if="!hasConversation" class="welcome-screen">
+           <div class="welcome-kicker"><span class="welcome-kicker-dot"></span> BANKPILOT · AI ASSISTANT</div>
+           <h1>你好，今天想办理什么？</h1>
+@@ -419,9 +472,8 @@ onMounted(checkHealth)
+         </section>
+       </section>
+ 
+-      <footer class="bp-composer">
++      <footer v-if="isAuthenticated" class="bp-composer">
+         <div class="composer-inner">
+-          <div v-if="!isAuthenticated" class="composer-connect">尚未登录演示银行。<button type="button" @click="settingsOpen = true">打开连接设置</button></div>
+           <form class="composer-form" @submit.prevent="send">
+             <input id="bank-command" v-model="input" :disabled="busy || pending" maxlength="300" placeholder="输入你的银行业务需求，例如：给李四转200元" aria-label="输入银行业务指令" />
+             <button type="submit" :disabled="busy || pending || !input.trim()" aria-label="发送消息">发送 <span aria-hidden="true">↗</span></button>
+diff --git a/frontend/src/components/AuthPanel.vue b/frontend/src/components/AuthPanel.vue
+new file mode 100644
+index 0000000..ce8a2c0
+--- /dev/null
++++ b/frontend/src/components/AuthPanel.vue
+@@ -0,0 +1,107 @@
++<script setup>
++import { ref, watch } from 'vue'
++
++const props = defineProps({
++  mode: { type: String, default: 'login' },
++  busy: { type: Boolean, default: false },
++  notice: { type: String, default: '' },
++})
++const emit = defineEmits(['mode-change', 'login', 'register'])
++const username = ref('')
++const password = ref('')
++const fullName = ref('')
++const phone = ref('')
++const confirmation = ref('')
++const validationError = ref('')
++
++function clearInputs() {
++  username.value = ''
++  password.value = ''
++  confirmation.value = ''
++  fullName.value = ''
++  phone.value = ''
++  validationError.value = ''
++}
++watch(() => props.mode, clearInputs)
++
++function switchMode(mode) {
++  if (props.busy || mode === props.mode) return
++  clearInputs()
++  emit('mode-change', mode)
++}
++
++function submit() {
++  if (props.busy) return
++  validationError.value = ''
++  const name = username.value.trim()
++  if (props.mode === 'login') {
++    if (!name || !password.value) {
++      validationError.value = '请填写用户名和密码。'
++      return
++    }
++    emit('login', { username: name, password: password.value })
++    password.value = ''
++    return
++  }
++  if (!/^[A-Za-z0-9_]{3,32}$/.test(name)) {
++    validationError.value = '用户名须为3～32位字母、数字或下划线。'
++    return
++  }
++  if (password.value.length < 8 || password.value.length > 128) {
++    validationError.value = '密码长度须为8～128位。'
++    return
++  }
++  if (password.value !== confirmation.value) {
++    validationError.value = '两次输入的密码不一致。'
++    return
++  }
++  if (!fullName.value.trim() || fullName.value.trim().length > 50) {
++    validationError.value = '姓名不能为空，且不能超过50个字符。'
++    return
++  }
++  if (!/^1[3-9]\d{9}$/.test(phone.value.trim())) {
++    validationError.value = '请填写正确的11位手机号。'
++    return
++  }
++  emit('register', {
++    username: name,
++    password: password.value,
++    fullName: fullName.value.trim(),
++    phone: phone.value.trim(),
++  })
++  password.value = ''
++  confirmation.value = ''
++}
++</script>
++
++<template>
++  <div class="auth-panel" aria-label="银行用户认证">
++    <div class="auth-topline">BANKPILOT · DAY 07</div>
++    <h1>{{ mode === 'login' ? '登录模拟银行账户' : '注册模拟银行账户' }}</h1>
++    <p class="auth-subtitle">{{ mode === 'login' ? '登录后访问仅属于你的银行数据和 AI 助手。' : '每人一个独立模拟账户，注册成功后请自行登录。' }}</p>
++    <div class="auth-tabs" role="group" aria-label="选择注册或登录">
++      <button type="button" :class="{active: mode === 'login'}" :disabled="busy" @click="switchMode('login')">登录</button>
++      <button type="button" :class="{active: mode === 'register'}" :disabled="busy" @click="switchMode('register')">注册</button>
++    </div>
++    <form class="auth-form" @submit.prevent="submit">
++      <label for="bank-username">用户名</label>
++      <input id="bank-username" v-model="username" name="username" autocomplete="username" maxlength="32" required :disabled="busy" placeholder="请输入用户名" />
++      <template v-if="mode === 'register'">
++        <label for="bank-full-name">姓名</label>
++        <input id="bank-full-name" v-model="fullName" autocomplete="name" maxlength="50" required :disabled="busy" placeholder="模拟银行账户姓名" />
++        <label for="bank-phone">手机号</label>
++        <input id="bank-phone" v-model="phone" type="tel" autocomplete="tel" maxlength="11" required :disabled="busy" placeholder="11位手机号码" />
++      </template>
++      <label for="bank-password">密码</label>
++      <input id="bank-password" v-model="password" type="password" :autocomplete="mode === 'login' ? 'current-password' : 'new-password'" :minlength="mode === 'register' ? 8 : 1" maxlength="128" required :disabled="busy" placeholder="请输入密码" />
++      <template v-if="mode === 'register'">
++        <label for="bank-confirm-password">确认密码</label>
++        <input id="bank-confirm-password" v-model="confirmation" type="password" autocomplete="new-password" minlength="8" maxlength="128" required :disabled="busy" placeholder="再次输入密码" />
++      </template>
++      <p v-if="validationError" class="auth-error" role="alert">{{ validationError }}</p>
++      <p v-if="notice" class="auth-notice" role="status">{{ notice }}</p>
++      <button type="submit" class="auth-submit" :disabled="busy">{{ busy ? '请稍候…' : (mode === 'login' ? '登录' : '注册账户') }}</button>
++    </form>
++    <p class="auth-footnote">仅供模拟银行演示 · 不保存登录 Token 到浏览器本地存储</p>
++  </div>
++</template>
+diff --git a/frontend/src/style.css b/frontend/src/style.css
+index f54b135..6ea4e53 100644
+--- a/frontend/src/style.css
++++ b/frontend/src/style.css
+@@ -60,3 +60,28 @@ button:focus-visible,input:focus-visible,summary:focus-visible{outline:3px solid
+ @media(max-width:750px){.bp-sidebar{display:none}.bp-header{height:76px;padding:13px 18px}.bp-content{padding:24px 15px 30px}.bp-composer{padding:12px 13px 15px}.welcome-screen{margin:30px auto 20px}.connection-drawer{right:12px;top:65px}}
+ @media(max-width:550px){.header-subtitle,.header-divider,.header-caption{display:none}.header-title{font-size:15px}.header-actions{gap:8px}.settings-trigger{padding:8px 10px}.settings-symbol,.settings-caret{display:none}.service-state{font-size:10px}.welcome-screen h1{font-size:25px}.welcome-description{font-size:12px}.welcome-break{display:none}.sample-label{margin-top:30px}.sample-grid{grid-template-columns:1fr;gap:9px}.sample-card{min-height:57px}.bp-chat{gap:20px}.bp-message-content{max-width:calc(100% - 42px)}.msg.assistant:has(.workflow-results) .bp-message-content{width:calc(100% - 42px)}.composer-form{padding-left:11px}.composer-form button{padding:10px 13px}.composer-note{font-size:9px}}
+ @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
++
++/* Day 7 authenticated entry. Existing chat and approval card styles unchanged. */
++.current-user{font-size:12px;font-weight:700;color:#315978;white-space:nowrap}
++.logout-trigger{border:1px solid #dce6f0;background:#fff;color:#345c7f;border-radius:10px;padding:10px 13px;font-size:12px;font-weight:700}
++.logout-trigger:not(:disabled):hover{background:#f1f6fc}
++.logout-trigger:disabled{opacity:.55;cursor:wait}
++.auth-content{display:flex;align-items:flex-start;justify-content:center;padding-top:50px}
++.auth-panel{width:min(435px,100%);padding:30px 32px 25px;border:1px solid #e0e8f2;border-radius:18px;background:#fff;box-shadow:0 12px 34px rgba(35,60,94,.065)}
++.auth-topline{font-size:10px;font-weight:800;letter-spacing:1.6px;color:#5288c3}
++.auth-panel h1{color:#213b5c;font-size:24px;margin:12px 0 8px}
++.auth-subtitle{font-size:12px;color:#8494a8;line-height:1.7;margin:0 0 20px}
++.auth-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px;border-radius:10px;background:#f1f5fa;padding:5px;margin-bottom:18px}
++.auth-tabs button{border:0;background:transparent;color:#7d8da0;padding:10px;border-radius:7px;font-weight:700}
++.auth-tabs button.active{background:#fff;color:#2d6ead;box-shadow:0 2px 8px rgba(44,75,112,.08)}
++.auth-form{display:flex;flex-direction:column;gap:8px}
++.auth-form label{font-size:12px;color:#405874;font-weight:700;margin-top:4px}
++.auth-form input{width:100%;min-width:0;border:1px solid #dce5ef;border-radius:9px;background:#fbfcff;padding:12px;font-size:13px;color:#273c56}
++.auth-form input:focus{outline:2px solid #bed8f6;outline-offset:1px}
++.auth-submit{margin-top:13px;border:0;border-radius:10px;background:#2e79ca;color:#fff;padding:12px;font-size:13px;font-weight:750}
++.auth-submit:disabled{opacity:.55;cursor:wait}
++.auth-error,.auth-notice{font-size:12px;line-height:1.6;border-radius:8px;padding:9px 11px;margin:5px 0 0}
++.auth-error{color:#b34444;background:#fff0f0}.auth-notice{color:#34658b;background:#edf5ff}
++.auth-footnote{text-align:center;color:#9aa9b9;font-size:10px;margin:20px 0 0;line-height:1.6}
++.session-notice{max-width:795px;margin:0 auto 12px;padding:10px 12px;background:#fff4ec;color:#986039;border-radius:9px;font-size:12px}
++@media(max-width:550px){.current-user{font-size:10px;max-width:90px;overflow:hidden;text-overflow:ellipsis}.logout-trigger{font-size:10px;padding:8px}.auth-panel{padding:24px 20px}.auth-content{padding:28px 14px}}
