@@ -9,7 +9,7 @@ const props = defineProps({
   actionError: { type: String, default: '' },
   otpNotice: { type: String, default: '' },
 })
-const emit = defineEmits(['decision', 'otpRequest', 'refresh', 'recover'])
+const emit = defineEmits(['decision', 'otpRequest', 'refresh', 'recover', 'recipientSelect', 'recipientCancel'])
 const confirmed = ref(false)
 const otp = ref('')
 const otpRequested = ref(false)
@@ -17,6 +17,10 @@ const localError = ref('')
 
 const order = computed(() => props.task.transferOrder || null)
 const cancellation = computed(() => props.task.cancellationOrder || null)
+const aaCollection = computed(() => props.task.aaCollection || null)
+const scheduled = computed(() => props.task.scheduledTransfer || null)
+const isSchedulePending = computed(() => status.value === 'WAITING_SCHEDULE_AUTH' && scheduled.value?.status === 'PENDING_AUTH')
+const isAaPending = computed(() => status.value === 'WAITING_AA_CONFIRMATION' && aaCollection.value?.status === 'DRAFT')
 const status = computed(() => props.task.status || 'UNKNOWN')
 const isTransferPending = computed(() => status.value === 'WAITING_TRANSFER_APPROVAL' && Boolean(order.value?.orderId))
 const isCancellationPending = computed(() => status.value === 'WAITING_APPROVAL' && Boolean(cancellation.value?.orderId))
@@ -36,15 +40,20 @@ const showSubscriptions = computed(() => subscriptions.value && requested.value.
 const showMonthly = computed(() => monthly.value && requested.value.has('monthly_analytics'))
 const hasVisibleRead = computed(() => showBalance.value || showTransactions.value || showPayees.value || showSubscriptions.value || showMonthly.value)
 const technicalOpen = ref(false)
+const recipientChoices = computed(() => Array.isArray(props.task.recipientChoices) ? props.task.recipientChoices : [])
+const choosingRecipient = computed(() => status.value === 'WAITING_RECIPIENT_SELECTION' && recipientChoices.value.length > 1)
+const selectedRecipientId = ref(null)
 
 const taskNames = {
   get_balance: '查询余额', get_transactions: '最近交易', get_payees: '查询收款人',
   monthly_analytics: '月度收支分析', list_subscriptions: '查询代扣订阅',
   transfer_prepare: '模拟转账', cancel_subscription: '取消代扣',
+  create_aa_collection: 'AA收款', schedule_transfer: '定时转账',
 }
 const states = {
   COMPLETED: '任务完成', REJECTED: '用户已拒绝', NOT_CONFIRMED: '银行结果待核查',
   WAITING_TRANSFER_APPROVAL: '等待转账审批', WAITING_APPROVAL: '等待代扣审批',
+  WAITING_SCHEDULE_AUTH: '预约强制OTP验证', WAITING_RECIPIENT_SELECTION: '请选择收款人', WAITING_AA_CONFIRMATION: '确认AA收款请求', RECIPIENT_INVALID_SELECTION: '收款人选择无效',
   NEEDS_CLARIFICATION: '需要补充信息', NOT_IMPLEMENTED_YET: '未支持的操作',
   TARGET_NOT_FOUND: '未找到有效订阅', TARGET_AMBIGUOUS: '多个订阅匹配',
   TARGET_INVALID: '订阅信息异常', PAYEE_NOT_FOUND: '未找到收款人',
@@ -52,6 +61,7 @@ const states = {
 }
 
 watch([status, () => order.value?.orderId, () => cancellation.value?.orderId], () => {
+  selectedRecipientId.value = null
   confirmed.value = false
   otp.value = ''
   otpRequested.value = false
@@ -67,19 +77,31 @@ function when(t) { return t.occurredAt || t.occurred_at || '' }
 function merchant(s) { return s.merchantName || s.merchant_name || '未知商户' }
 function labelOf(item) {
   if (item.type === 'monthly_analytics') return `${taskNames[item.type]}（${item.month || '月份待确认'}）`
-  if (item.type === 'transfer_prepare') return `${taskNames[item.type]}（${item.payee_name || '未知'}，${money(item.amount)}）`
+  if (item.type === 'schedule_transfer') return `${taskNames[item.type]}（${money(item.amount)}，${item.execute_at || '待确认时间'}）`
+  if (item.type === 'transfer_prepare') return `${taskNames[item.type]}（${item.payee_name || item.payee_phone || '未知'}，${money(item.amount)}）`
+  if (item.type === 'create_aa_collection') return `${taskNames[item.type]}（${money(item.amount)}）`
   if (item.type === 'cancel_subscription') return `${taskNames[item.type]}（${item.target_name || '未知'}）`
   return taskNames[item.type] || item.type
+}
+function confirmRecipient() {
+  if (props.busy || props.locked) return
+  const id = Number(selectedRecipientId.value)
+  if (!Number.isSafeInteger(id) || !recipientChoices.value.some(p => p.recipientId === id)) {
+    localError.value = '请选择列表中的正确收款账户。'
+    return
+  }
+  localError.value = ''
+  emit('recipientSelect', { threadId: props.task.threadId, recipientId: id })
 }
 function approve(kind) {
   localError.value = ''
   if (props.busy || props.locked) return
   if (!confirmed.value) { localError.value = '请先核对金额和业务对象，并勾选明确确认。'; return }
-  if (kind === 'transfer' && riskRed.value) {
+  if ((kind === 'transfer' && riskRed.value) || kind === 'schedule') {
     if (!otpRequested.value) { localError.value = 'RED 风险请先向银行申请验证码。'; return }
     if (!/^\d{6}$/.test(otp.value)) { localError.value = '请填写银行提供的六位验证码。'; return }
   }
-  const code = kind === 'transfer' && riskRed.value ? otp.value : undefined
+  const code = (kind === 'transfer' && riskRed.value) || kind === 'schedule' ? otp.value : undefined
   emit('decision', { threadId: props.task.threadId, kind, approved: true, otpCode: code })
   otp.value = '' // Never send OTP to model or store it in conversation messages.
 }
@@ -94,7 +116,7 @@ function reject(kind) {
 <template>
   <div class="workflow-results" aria-label="银行业务处理结果">
     <div class="result-status-row">
-      <span class="result-status-icon" :class="{ 'is-done': status === 'COMPLETED', 'is-waiting': isTransferPending || isCancellationPending }" aria-hidden="true">{{ status === 'COMPLETED' ? '✓' : (isTransferPending || isCancellationPending ? '·' : 'i') }}</span>
+      <span class="result-status-icon" :class="{ 'is-done': status === 'COMPLETED', 'is-waiting': isTransferPending || isCancellationPending || choosingRecipient || isAaPending || isSchedulePending }" aria-hidden="true">{{ status === 'COMPLETED' ? '✓' : (isTransferPending || isCancellationPending || choosingRecipient || isAaPending || isSchedulePending ? '·' : 'i') }}</span>
       <span class="result-status-text">{{ states[status] || '处理结果' }}</span>
       <span v-if="planTasks.length > 1" class="result-multi">{{ planTasks.length }} 项任务</span>
     </div>
@@ -127,10 +149,23 @@ function reject(kind) {
 
     <MonthlyAnalyticsCard v-if="showMonthly" :data="monthly" />
 
+    <div v-if="choosingRecipient" class="result-card recipient-picker" aria-label="选择重名收款人">
+      <div class="result-title"><span class="result-glyph blue" aria-hidden="true">◎</span><div><strong>请选择正确的收款人</strong><small>同名用户需要人工选择；目前未创建转账订单</small></div></div>
+      <p class="recipient-tip">下列候选信息来自银行目录。请选择对应的脱敏账号，避免转给同名的其他人。</p>
+      <div class="recipient-options">
+        <label v-for="p in recipientChoices" :key="p.recipientId" class="recipient-option" :class="{ active: Number(selectedRecipientId) === p.recipientId }">
+          <input v-model="selectedRecipientId" type="radio" name="transfer-recipient" :value="p.recipientId" :disabled="busy || locked" />
+          <span class="recipient-person"><strong>{{ p.payeeName }}</strong><small>银行账户 {{ p.accountMasked }}</small></span>
+          <span class="recipient-radio-mark" aria-hidden="true"></span>
+        </label>
+      </div>
+      <div class="approval-actions"><button class="approval-primary" type="button" :disabled="busy || locked || selectedRecipientId == null" @click="confirmRecipient">确认收款对象并继续</button><button class="approval-secondary" type="button" :disabled="busy" @click="emit('recipientCancel', task.threadId)">放弃本次转账</button><button class="approval-secondary" type="button" :disabled="busy" @click="emit('refresh', task.threadId)">刷新任务状态</button></div>
+    </div>
+
     <div v-if="order" class="result-card transfer-card" aria-label="转账订单">
       <div class="result-title"><span class="result-glyph blue" aria-hidden="true">↗</span><div><strong>模拟转账</strong><small>{{ order.status === 'SUCCESS' ? '银行已确认执行成功' : (order.status === 'CANCELLED' || order.status === 'REJECTED' ? '该笔转账已取消' : '请核对以下交易信息') }}</small></div><span class="risk-pill" :class="order.riskLevel === 'RED' ? 'risk-red' : 'risk-yellow'">{{ order.riskLevel === 'RED' ? '高风险 · OTP' : (order.riskLevel === 'YELLOW' ? '需人工确认' : (order.riskLevel || '待核查')) }}</span></div>
       <div class="transfer-amount">{{ money(order.amount) }}</div>
-      <div class="detail-grid"><div><span>收款人</span><strong>{{ order.payeeName || task.transferCandidate?.payeeName || '—' }}</strong></div><div><span>收款账户</span><strong>{{ order.accountMasked || task.transferCandidate?.accountMasked || '—' }}</strong></div></div>
+      <div class="detail-grid"><div><span>收款人</span><strong>{{ order.payeeName || task.transferCandidate?.payeeName || '—' }}</strong></div><div><span>收款账户</span><strong>{{ order.accountMasked || task.transferCandidate?.accountMasked || '—' }}</strong></div><div v-if="order.remark || task.transferCandidate?.remark" class="transfer-remark"><span>转账备注</span><strong>{{ order.remark || task.transferCandidate?.remark }}</strong></div></div>
       <div class="order-current"><span>银行状态</span><strong :class="order.status === 'SUCCESS' ? 'state-success' : ''">{{ order.status === 'SUCCESS' ? '转账成功' : (order.status === 'PENDING_APPROVAL' ? '待批准' : (order.status || '核查中')) }}</strong></div>
     </div>
 
@@ -146,6 +181,36 @@ function reject(kind) {
       <div class="approval-actions"><button class="approval-primary" type="button" :disabled="busy || locked || !confirmed || (riskRed && (!otpRequested || !/^\d{6}$/.test(otp)))" @click="approve('transfer')">{{ busy ? '处理中…' : '确认转账' }}</button><button class="approval-secondary" type="button" :disabled="busy || locked" @click="reject('transfer')">拒绝转账</button></div>
     </div>
 
+
+    <div v-if="scheduled" class="result-card" aria-label="预约转账申请">
+      <div class="result-title"><span class="result-glyph blue">◷</span><div><strong>单次定时转账</strong><small>预约成功并不代表已扣款</small></div><span class="risk-pill risk-red">全部金额强制 OTP</span></div>
+      <div class="transfer-amount">{{ money(scheduled.amount) }}</div>
+      <div class="detail-grid"><div><span>收款人</span><strong>{{ scheduled.payeeName }}</strong></div><div><span>银行收款账户</span><strong>{{ scheduled.accountMasked }}</strong></div><div><span>预定执行时间</span><strong>{{ scheduled.executeAt?.replace('T', ' ') }}</strong></div><div><span>预约状态</span><strong>{{ scheduled.status }}</strong></div><div v-if="scheduled.remark"><span>备注</span><strong>{{ scheduled.remark }}</strong></div></div>
+      <p class="soft-note">OTP 用于授权固定金额、收款人和执行时间；到期由银行执行。错过执行窗口不补执行，失败不自动重试。</p>
+    </div>
+    <div v-if="isSchedulePending" class="approval-card" aria-label="定时转账强制OTP预授权">
+      <div class="approval-heading"><span class="approval-mark">!</span><div><strong>请确认预约并完成强验证</strong><p>所有金额都必须提前 OTP。此时不会从账户扣款。</p></div></div>
+      <div class="otp-area">
+        <div class="otp-head"><div><strong>预约专属 OTP</strong><small>验证码只验证此笔固定预约，不会永久保存验证码</small></div><button type="button" class="otp-request" :disabled="busy || locked" @click="emit('otpRequest', task.threadId)">申请验证码</button></div>
+        <p v-if="otpNotice" class="otp-feedback">{{ otpNotice }}</p>
+        <input v-model="otp" type="password" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="输入六位 OTP" :disabled="busy || locked" />
+      </div>
+      <label class="approval-check"><input v-model="confirmed" type="checkbox" :disabled="busy || locked"/><span>我已经核对收款人、金额、时间和备注，同意创建专属预授权。</span></label>
+      <div class="approval-actions"><button type="button" class="approval-primary" :disabled="busy || locked || !confirmed || !otpRequested || !/^\d{6}$/.test(otp)" @click="approve('schedule')">验证 OTP 并预约</button><button type="button" class="approval-secondary" :disabled="busy || locked" @click="reject('schedule')">取消本次预约</button></div>
+    </div>
+
+    <div v-if="aaCollection" class="result-card" aria-label="AA收款申请">
+      <div class="result-title"><span class="result-glyph blue" aria-hidden="true">◎</span><div><strong>AA 收款明细</strong><small>{{ aaCollection.reason || 'AA 费用分摊' }}</small></div><span class="result-title-side">{{ aaCollection.status === 'DRAFT' ? '待发布' : aaCollection.status === 'CANCELLED' ? '已撤销' : '银行已记录' }}</span></div>
+      <div class="detail-grid" style="margin-top:16px"><div><span>费用总额</span><strong>{{ money(aaCollection.totalAmount) }}</strong></div><div><span>需要向其他人收取</span><strong>{{ money(aaCollection.requestedAmount) }}</strong></div><div><span>自己承担</span><strong>{{ money(aaCollection.selfAmount) }}</strong></div><div><span>已实际收到</span><strong>{{ money(aaCollection.receivedAmount) }}</strong></div></div>
+      <div v-for="item in aaCollection.items" :key="item.itemId" class="result-line"><div><strong>{{ item.payerName }}</strong><small>独立确认后付款</small></div><b>{{ money(item.amount) }} · {{ item.status === 'PAID' ? '已支付' : item.status === 'DECLINED' ? '已拒绝' : '待付款' }}</b></div>
+      <p class="soft-note">仅发布收款请求不会扣款。付款方登录自己的账户后才能批准并支付。</p>
+    </div>
+    <div v-if="isAaPending" class="approval-card" aria-label="AA发布人工确认">
+      <div class="approval-heading"><span class="approval-mark" aria-hidden="true">!</span><div><strong>确认发布 AA 收款请求</strong><p>请核对每位付款人和金额；发布后不会立即从他人账户扣款。</p></div></div>
+      <label class="approval-check"><input v-model="confirmed" type="checkbox" :disabled="busy || locked" /><span>我已核对收款人员和金额，明确同意发送以上收款请求。</span></label>
+      <div class="approval-actions"><button class="approval-primary" type="button" :disabled="busy || locked || !confirmed" @click="approve('aa')">确认发布</button><button class="approval-secondary" type="button" :disabled="busy || locked" @click="reject('aa')">取消草稿</button></div>
+    </div>
+
     <div v-if="cancellation" class="result-card cancel-card" aria-label="取消代扣申请">
       <div class="result-title"><span class="result-glyph teal" aria-hidden="true">↻</span><div><strong>取消自动扣费</strong><small>{{ task.candidate?.merchantName || '订阅服务' }}</small></div><span class="result-title-side">{{ cancellation.status === 'SUCCESS' ? '已取消' : cancellation.status === 'REJECTED' ? '已保留订阅' : '等待确认' }}</span></div>
       <div class="cancel-amount"><strong>{{ money(task.candidate?.amount) }}</strong><span>{{ task.candidate?.billingCycle === 'MONTHLY' ? '每月扣费' : '订阅金额' }}</span></div>
@@ -158,10 +223,10 @@ function reject(kind) {
       <div class="approval-actions"><button class="approval-primary" type="button" :disabled="busy || locked || !confirmed" @click="approve('cancel')">{{ busy ? '处理中…' : '确认取消' }}</button><button class="approval-secondary" type="button" :disabled="busy || locked" @click="reject('cancel')">保留订阅</button></div>
     </div>
 
-    <div v-if="task.details && !['COMPLETED', 'WAITING_TRANSFER_APPROVAL', 'WAITING_APPROVAL'].includes(status)" class="result-detail-note">{{ task.details }}</div>
+    <div v-if="task.details && !['COMPLETED', 'WAITING_TRANSFER_APPROVAL', 'WAITING_APPROVAL', 'WAITING_RECIPIENT_SELECTION', 'WAITING_AA_CONFIRMATION', 'WAITING_SCHEDULE_AUTH'].includes(status)" class="result-detail-note">{{ task.details }}</div>
     <div v-if="localError || actionError" class="result-error" role="alert">{{ localError || actionError }}</div>
     <div v-if="locked" class="result-lock" role="alert">银行状态暂时无法确认，已锁定审批操作。请先核实原订单，避免重复提交。</div>
-    <div v-if="task.threadId && (locked || isTransferPending || isCancellationPending || status === 'NOT_CONFIRMED')" class="approval-actions">
+    <div v-if="task.threadId && (locked || isTransferPending || isCancellationPending || isAaPending || isSchedulePending || status === 'NOT_CONFIRMED')" class="approval-actions">
       <button type="button" class="approval-secondary" :disabled="busy" @click="emit('refresh', task.threadId)">刷新原任务状态</button>
       <button v-if="status === 'NOT_CONFIRMED' && typeof task.approvalDecision === 'boolean'" type="button" class="approval-secondary" :disabled="busy" @click="emit('recover', task.threadId, task.approvalDecision)">按原审批决定恢复</button>
     </div>
@@ -170,6 +235,7 @@ function reject(kind) {
     <details class="technical-details">
       <summary>查看订单信息</summary>
       <div v-if="order?.orderId">转账订单：{{ order.orderId }}</div>
+      <div v-if="scheduled?.scheduleId">预约编号：{{ scheduled.scheduleId }}</div>
       <div v-if="cancellation?.orderId">代扣申请：{{ cancellation.orderId }}</div>
       <div v-if="task.threadId">任务编号：{{ task.threadId }}</div>
     </details>
@@ -196,6 +262,9 @@ function reject(kind) {
 .empty-line{padding:15px 2px 5px;color:#94a2b0;font-size:12px}
 .transfer-amount{font-size:clamp(27px,4vw,36px);font-weight:800;text-align:center;color:#153d72;letter-spacing:-.8px;margin:23px 0 17px;font-variant-numeric:tabular-nums}
 .detail-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:14px}
+.detail-grid .transfer-remark{grid-column:1/-1}
+.recipient-tip{font-size:12px;line-height:1.75;color:#6b8199;margin:16px 0 12px}
+.recipient-options{display:grid;gap:9px;margin-bottom:16px}.recipient-option{display:flex;gap:12px;align-items:center;padding:13px 16px;border:1px solid #dce6f3;border-radius:12px;cursor:pointer;background:#f8fbff;transition:border-color .15s,background .15s}.recipient-option.active{border-color:#3688e6;background:#edf6ff;box-shadow:0 0 0 2px rgba(54,136,230,.08)}.recipient-option input{accent-color:#2078da;width:17px;height:17px}.recipient-person{display:grid;gap:4px}.recipient-person strong{font-size:13px;color:#173954}.recipient-person small{font-size:11px;color:#6c829b}
 .detail-grid>div{background:#f6f9fd;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:6px;min-width:0}.detail-grid span{font-size:11px;color:#8797aa}.detail-grid strong{font-size:13px;color:#213c5b;overflow-wrap:anywhere}
 .order-current{border-top:1px solid #edf1f7;padding-top:13px;display:flex;justify-content:space-between;gap:12px;font-size:12px;color:#8394a6}.order-current strong{color:#44617e}
 .risk-pill{margin-left:auto;white-space:nowrap;font-size:11px;font-weight:650;padding:7px 9px;border-radius:8px}.risk-yellow{background:#fff3df;color:#a77525}.risk-red{background:#fff0ed;color:#c05242}
