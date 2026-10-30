@@ -34,13 +34,19 @@ def match_registered_payee(payees: Any, name: str, amount: str) -> tuple[str, di
 
 async def prepare_verified_transfer(candidate: dict, request_id: str, bearer: str) -> dict:
     """Only create a pending order; enforce that response matches selected payee."""
-    order = await bank.prepare_transfer(
-        candidate['id'], candidate['amount'], request_id, bearer)
+    remark = candidate.get('remark', '')
+    if remark:
+        order = await bank.prepare_transfer(
+            candidate['id'], candidate['amount'], request_id, bearer, remark=remark)
+    else:
+        order = await bank.prepare_transfer(
+            candidate['id'], candidate['amount'], request_id, bearer)
     try:
         correct = (
                 str(order['payeeName']).strip() == candidate['payeeName']
                 and Decimal(str(order['amount'])) == Decimal(candidate['amount'])
                 and str(order['accountMasked']) == candidate['accountMasked']
+                and (not remark or order.get('remark') == remark)
                 and order['status'] == 'PENDING_APPROVAL'
                 and order['riskLevel'] in ('YELLOW', 'RED')
                 and bool(order['orderId'])

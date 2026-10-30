@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from app import llm_router
 from app.graph.task_registry import TASK_REGISTRY, resolve_execution_order
 from app.transfer_parser import normalize_amount
+from app.graph.schedule_time import CN, validate_schedule_time
 
 
 class PlannerError(Exception):
@@ -27,7 +28,14 @@ class Task(BaseModel):
     month: str | None = None
     target_name: str | None = None
     payee_name: str | None = None
+    payee_phone: str | None = None
+    remark: str | None = None
     amount: str | None = None
+    execute_at: str | None = None
+    time_expression: str | None = None
+    aa_participants: list[str] | None = None
+    aa_mode: str | None = None
+    aa_reason: str | None = None
 
 
 class Draft(BaseModel):
@@ -85,7 +93,8 @@ def _transfer_amount_mentioned(message: str, amount: str) -> bool:
     return False
 
 
-def validate_plan(raw: dict, today: date | None = None, message: str | None = None) -> TaskPlan:
+def validate_plan(raw: dict, today: date | None = None, message: str | None = None,
+                  now: datetime | None = None) -> TaskPlan:
     """Validate planned tasks using the shared registry. Does not call the bank."""
     try:
         draft = Draft.model_validate(raw)
@@ -110,7 +119,7 @@ def validate_plan(raw: dict, today: date | None = None, message: str | None = No
         return _clarify(draft.tasks,
                         '一次复合请求最多包含一项需审批业务。请将转账和取消订阅拆成两条指令；本次未执行任何任务。')
 
-    current = today or datetime.now(timezone(timedelta(hours=8))).date()
+    current = today or (now or datetime.now(CN)).astimezone(CN).date()
     current_month = current.strftime("%Y-%m")
     seen: set[str] = set()
     for task in draft.tasks:
@@ -121,7 +130,7 @@ def validate_plan(raw: dict, today: date | None = None, message: str | None = No
 
         # Parameters must match the registered task rather than just matching
         # the generic Task model. No account numbers, IDs or executor URLs here.
-        for name in ("month", "target_name", "payee_name", "amount"):
+        for name in ("month", "target_name", "payee_name", "payee_phone", "remark", "amount", "aa_participants", "aa_mode", "aa_reason", "execute_at", "time_expression"):
             if name not in spec.required_params and name in task.model_fields_set:
                 raise PlannerError(f"任务 {task.type} 不接受参数 {name}。")
 
@@ -141,11 +150,23 @@ def validate_plan(raw: dict, today: date | None = None, message: str | None = No
             if message is not None and task.target_name.strip() not in message:
                 return _clarify(draft.tasks, "请确认要取消的订阅名称，避免匹配错误。")
 
-        if task.type == "transfer_prepare":
-            if not task.payee_name or not task.payee_name.strip():
-                return _clarify(draft.tasks, "请告诉我要转账给哪位常用收款人。")
-            if message is not None and task.payee_name.strip() not in message:
-                return _clarify(draft.tasks, "收款人与输入不一致，请明确收款人名称。")
+        if task.type in ("transfer_prepare", "schedule_transfer"):
+            name = (task.payee_name or '').strip()
+            phone = (task.payee_phone or '').strip()
+            if not name and not phone:
+                return _clarify(draft.tasks, "请在同一条指令中提供收款人姓名或手机号。")
+            if name and (len(name) > 50 or (message is not None and name not in message)):
+                return _clarify(draft.tasks, "收款人姓名与输入不一致，请重新输入完整指令。")
+            if phone and (not re.fullmatch(r'1[3-9]\d{9}', phone)
+                          or (message is not None and phone not in message)):
+                return _clarify(draft.tasks, "收款人手机号无效或与原始指令不一致。")
+            remark = (task.remark or '').strip()
+            if (len(remark) > 80 or any(ord(c) < 32 for c in remark)
+                    or (message is not None and remark and remark not in message)):
+                return _clarify(draft.tasks, "转账备注无效或不在原始输入中，请重新提供完整指令。")
+            task.payee_name = name or None
+            task.payee_phone = phone or None
+            task.remark = remark or None
             if task.amount is None:
                 return _clarify(draft.tasks, "请提供明确的转账金额；不会猜测金额或创建订单。")
             try:
@@ -155,6 +176,55 @@ def validate_plan(raw: dict, today: date | None = None, message: str | None = No
             if message is not None and not _transfer_amount_mentioned(message, amount):
                 return _clarify(draft.tasks, "无法确认转账金额与原始输入一致，请提供数字金额。")
             task.amount = amount  # Normalize only; a transfer is not prepared here.
+            if task.type == "schedule_transfer":
+                # The LLM extracts the exact phrase and calculates the date.
+                # Python DOES NOT re-interpret relative dates or Chinese clocks.
+                expression = (task.time_expression or '').strip()
+                if (message is None or not expression or len(expression) > 100
+                        or expression not in message
+                        or any(ord(ch) < 32 for ch in expression)):
+                    return _clarify(draft.tasks, "请在同一条指令中提供明确的预约时间；无法核实原话中的时间表达。")
+                # Refuse obvious missing-clock expressions. This is a syntactic
+                # presence check, not a natural-language date-time parser.
+                if not re.search(r'(?:\d{1,2}|[零一二三四五六七八九十两]{1,3})\s*(?:点|时|分|秒|[:：.．])', expression):
+                    return _clarify(draft.tasks, "请一次性提供明确的执行日期与时刻，例如明天下午3点。")
+                normalized = validate_schedule_time(task.execute_at, now=now)
+                if not normalized:
+                    return _clarify(draft.tasks, "预约时间不是合法的未来北京时间；请重新输入包含完整时间的指令。")
+                task.time_expression = expression
+                task.execute_at = normalized
+
+        if task.type == 'create_aa_collection':
+            people = task.aa_participants
+            if (not isinstance(people, list) or not (1 <= len(people) <= 10)
+                    or any(not isinstance(x, str) or not x.strip() or len(x.strip()) > 50 for x in people)):
+                return _clarify(draft.tasks, 'AA 指令必须一次写清楚收款人员、金额和分摊方式；请重新输入完整指令。')
+            people = [x.strip() for x in people]
+            if len(set(people)) != len(people) or (message is not None and any(x not in message for x in people)):
+                return _clarify(draft.tasks, 'AA 收款对象重复或不在原话中，请重新输入完整指令。')
+            # The model may not decide an ambiguous split rule. The user must
+            # explicitly say "我和...AA" or "每人收..." in a single utterance.
+            if task.aa_mode not in ('total_with_self', 'per_person'):
+                return _clarify(draft.tasks, '请明确总金额由你和大家AA，或明确每人需要支付的金额。')
+            if message is not None:
+                if task.aa_mode == 'total_with_self' and not ('我和' in message and 'AA' in message.upper()):
+                    return _clarify(draft.tasks, '请一次说明你也参与AA以及总金额。')
+                if task.aa_mode == 'per_person' and not re.search(r'每[人位个]', message):
+                    return _clarify(draft.tasks, '请明确写出每人应付金额。')
+            try:
+                amount = normalize_amount(task.amount) if task.amount is not None else None
+            except ValueError:
+                amount = None
+            if amount is None or (message is not None and not any(
+                    normalize_amount(m.group(1)) == amount for m in re.finditer(
+                        r'(?<!\d)(\d+(?:\.\d{1,2})?)\s*[元块]', message))):
+                return _clarify(draft.tasks, 'AA 必须在同一条指令中明确数字金额（例如300元），不能使用上下文补全。')
+            reason = (task.aa_reason or '').strip()
+            if len(reason) > 80 or (message is not None and reason and reason not in message):
+                return _clarify(draft.tasks, 'AA 收款说明与原始输入不一致。')
+            task.aa_participants = people
+            task.amount = amount
+            task.aa_reason = reason or None
 
     requested = [task.type for task in draft.tasks]
     return TaskPlan(
@@ -179,6 +249,15 @@ TASK_PARAMETER_SCHEMAS = {
         "type": "string",
         "description": "转账的收款人姓名"
     },
+    "payee_phone": {"type": "string", "description": "收款人已经注册的11位手机号，不是银行账号"},
+    "remark": {"type": "string", "description": "用户原话中出现的可选转账备注，最多80个字符"},
+    "time_expression": {"type": "string", "description": "预约时间在用户原话中出现的原文片段，必须逐字摘录，不允许改写，例如'明天下午3点'、'2分钟后'"},
+    "execute_at": {"type": "string", "description": "由模型将用户的预约时间转换为北京时间ISO8601：YYYY-MM-DDTHH:MM:SS+08:00；例如2026-11-30T21:37:00+08:00。不可猜测或省略时区。"},
+    "aa_participants": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 10,
+                        "description": "需付款的其他注册用户姓名或手机号，不包括自己；仅使用原文出现的姓名/手机号"},
+    "aa_mode": {"type": "string", "enum": ["total_with_self", "per_person"],
+                "description": "我和其他人AA总额用total_with_self；向别人每人收固定金额用per_person"},
+    "aa_reason": {"type": "string", "description": "可选AA收款说明，必须原文出现，最多80字"},
     "amount": {
         "type": "string",
         "description": "人民币金额的数字字符串，例如 200.00"
@@ -275,22 +354,42 @@ async def plan_tasks(message: str) -> TaskPlan:
     if not llm_router.enabled() or not llm_router.configured():
         raise PlannerError("请先配置并启用模型 API。")
 
-    today = datetime.now(timezone(timedelta(hours=8))).date()
+    # Pin one reference instant for BOTH the model and validation; essential
+    # for "2分钟后" and near-midnight relative expressions.
+    now = datetime.now(CN)
+    today = now.date()
     supported = "\n".join(
         f"- {name}：{spec.description}；允许参数：{', '.join(spec.required_params) or '无'}"
         for name, spec in TASK_REGISTRY.items()
     )
 
     system = (
-        f"当前银行业务日期：{today.isoformat()}（北京时间）。\n"
+        f"当前准确北京时间：{now.isoformat(timespec='seconds')}，时区 Asia/Shanghai (UTC+08:00)。\n"
         "你是银行任务规划器，不是银行交易执行者。\n"
         f"支持的任务：\n{supported}\n"
         "从自然语言中识别所有明确提出的任务，提交 submit_task_plan。"
         "每个任务只输出 type 和自身允许的参数，"
         "无关参数必须省略，不要填 null 占位。"
         "月度月份规范化为 YYYY-MM，未提供月份就省略 month。"
-        "转账只规划 transfer_prepare，绝不执行；"
-        "缺少金额或姓名时省略相应字段，不得猜测。"
+        "即时转账只规划 transfer_prepare；涉及预约/定时/未来时间转账必须规划 schedule_transfer，绝不能当作即时转账执行；"
+        "预约只允许单次，收款人和数字金额必须在原话中出现。"
+        "对 schedule_transfer 必须提供 time_expression 和 execute_at："
+        "time_expression 从用户原话逐字复制预约时间片段，不可改写，不可编造；"
+        "execute_at 由你依据提供的准确北京时间计算为 YYYY-MM-DDTHH:MM:SS+08:00，严格使用北京时间。"
+        "理解‘今天晚上10.35’‘2026年11月30日21.37’‘2分钟后’‘后天八点半’‘下周五下午6点’等表达，"
+        "其中‘下周五’按下一自然周周五理解；相对分钟必须以系统给出的准确时间计算，不可只使用日期。"
+        "时间没有说明具体时刻、凌晨/上午/下午含糊、已经过去、或用户要求周期性转账时，不可猜测：省略时间字段，让系统请求完整新指令。"
+        "例如用户说‘明天3点’而没有早晚时，不要推测是03:00还是15:00。"
+        "模型只理解并规范化时间，最终会由用户核对银行返回的预约时间，再通过OTP进行绑定确认。"
+        "所有预约必须经OTP，创建时不扣款。"
+        "收款人可用 payee_name 或 payee_phone，若用户同时给出两者则全部填写供银行交叉验证；"
+        "备注仅在用户明确提及时填写 remark，必须从原始指令逐字提取，不得编造。"
+        "缺少金额或收款人时省略相应字段，不得猜测。"
+        "AA 收款只规划 create_aa_collection，不执行支付；只接受信息完整的单轮指令。"
+        "例：'我和张三、李四聚餐300元，三个人AA'：aa_participants为['张三','李四']，"
+        "aa_mode为total_with_self，amount为300；"
+        "'向张三和李四每人收100元'：aa_mode为per_person，amount为100。"
+        "aa_reason仅提取原话的明确说明；AA金额不能编造，不支持缺失金额后的多轮追问。"
         "对于 cancel_subscription 任务，"
         "应从用户输入中提取要取消的订阅对象，填写 target_name。"
         "例如：'取消视频会员代扣'、'取消视频会员订阅'，"
@@ -324,6 +423,6 @@ async def plan_tasks(message: str) -> TaskPlan:
             if len(calls) != 1 or calls[0]["function"]["name"] != "submit_task_plan":
                 raise PlannerError("模型未返回可用的任务计划。")
             raw = json.loads(calls[0]["function"]["arguments"])
-            return validate_plan(raw, today=today, message=message)
+            return validate_plan(raw, today=today, message=message, now=now)
     except (httpx.HTTPError, KeyError, IndexError, ValueError, TypeError) as exc:
         raise PlannerError("模型请求失败或任务计划无法解析。") from exc

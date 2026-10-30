@@ -15,7 +15,7 @@ from app import banking_client as bank
 from app.graph.task_planner import plan_tasks
 from app.graph.dynamic_read_workflow import READ_TASK_TYPES, execute_read
 from app.graph.task_registry import TASK_REGISTRY
-from app.graph.transfer_prepare import match_registered_payee, prepare_verified_transfer
+from app.graph.transfer_prepare import prepare_verified_transfer
 from app.graph.transfer_approval_nodes import (
     assign_transfer_approval_ids, wait_transfer_approval, after_transfer_decision,
     transfer_authorize_node, after_transfer_authorize, transfer_execute_node,
@@ -46,12 +46,24 @@ class State(TypedDict, total=False):
     approvalDecision: bool
     cancellationOrder: dict
     transferCandidate: dict | None
+    recipientChoices: list[dict]
+    selectedRecipient: dict
     transferRequestId: str
     transferOrder: dict
     transferDecision: bool
     transferAuthorizeRequestId: str
     transferExecuteRequestId: str
     transferCancelRequestId: str
+    aaDraft: dict
+    aaPrepareRequestId: str
+    aaPublishRequestId: str
+    aaDiscardRequestId: str
+    aaDecision: bool
+    scheduledDraft: dict
+    scheduledPrepareRequestId: str
+    scheduledAuthorizeRequestId: str
+    scheduledCancelRequestId: str
+    scheduledDecision: bool
 
 
 async def plan_node(state: State) -> dict:
@@ -64,7 +76,7 @@ def validate_node(state: State) -> dict:
     if plan['status'] != 'ready':
         return {'status': 'NEEDS_CLARIFICATION',
                 'details': plan.get('clarification') or '请补充任务参数。'}
-    supported = READ_TASK_TYPES | {'cancel_subscription', 'transfer_prepare'}
+    supported = READ_TASK_TYPES | {'cancel_subscription', 'transfer_prepare', 'create_aa_collection', 'schedule_transfer'}
     unsupported = [t['type'] for t in plan['tasks'] if t['type'] not in supported]
     if unsupported:
         return {'status': 'NOT_IMPLEMENTED_YET',
@@ -84,9 +96,9 @@ def dispatch_reads(state: State):
         return END
     tasks = {task['type']: task for task in state['plan']['tasks']}
     # execution_order includes dependencies (e.g. cancel -> list_subscriptions).
-    return [Send('execute_read', {'task': tasks.get(task_type, {'type': task_type})})
-            for task_type in state['plan']['execution_order']
-            if task_type in READ_TASK_TYPES]
+    reads = [Send('execute_read', {'task': tasks.get(task_type, {'type': task_type})})
+             for task_type in state['plan']['execution_order'] if task_type in READ_TASK_TYPES]
+    return reads if reads else 'summarize_reads'
 
 
 def summarize_reads(state: State) -> dict:
@@ -94,7 +106,7 @@ def summarize_reads(state: State) -> dict:
     actual = {t for t, r in state.get('results', {}).items() if r.get('status') == 'SUCCESS'}
     if expected != actual:
         return {'status': 'INCOMPLETE', 'details': '只读查询结果不完整，未创建取消申请。'}
-    if any(t['type'] in ('cancel_subscription', 'transfer_prepare')
+    if any(t['type'] in ('cancel_subscription', 'transfer_prepare', 'create_aa_collection', 'schedule_transfer')
            for t in state['plan']['tasks']):
         return {'status': 'READS_COMPLETE'}
     return {'status': 'COMPLETED', 'details': '查询任务全部完成。'}
@@ -105,7 +117,9 @@ def after_reads(state: State):
         return END
     if any(t['type'] == 'cancel_subscription' for t in state['plan']['tasks']):
         return 'match_target'
-    return 'match_payee'
+    if any(t['type'] == 'create_aa_collection' for t in state['plan']['tasks']):
+        return 'assign_aa_prepare_request_id'
+    return 'resolve_registered_recipient'
 
 
 def match_target(state: State) -> dict:
@@ -312,20 +326,71 @@ async def verify_rejected(
 
 
 
-def match_payee(state: State) -> dict:
-    task = next(t for t in state['plan']['tasks']
-                if t['type'] == 'transfer_prepare')
-    status, candidate = match_registered_payee(
-        state['results']['get_payees']['data'],
-        task['payee_name'], task['amount'])
-    if status != 'PAYEE_FOUND':
-        return {'status': status,
-                'details': '没有唯一匹配的已保存收款人或金额不合法，未创建转账订单。'}
-    return {'status': 'PAYEE_FOUND', 'transferCandidate': candidate}
+async def resolve_registered_recipient(state: State, runtime: Runtime[Context]) -> dict:
+    """Search the bank directory, not an LLM-provided account number."""
+    task = next(t for t in state['plan']['tasks'] if t['type'] in ('transfer_prepare', 'schedule_transfer'))
+    choices = await bank.search_registered_recipients(
+        runtime.context['authorization'], name=task.get('payee_name'),
+        phone=task.get('payee_phone'))
+    if not choices:
+        return {'status': 'PAYEE_NOT_FOUND',
+                'details': '银行没有找到匹配的注册用户，未创建转账订单。'}
+    if len(choices) == 1:
+        return {'status': 'RECIPIENT_SELECTED', 'selectedRecipient': choices[0],
+                'recipientChoices': choices}
+    return {'status': 'RECIPIENT_CHOICES', 'recipientChoices': choices,
+            'details': '找到多个同名收款用户，请选择正确的脱敏账户。尚未创建转账订单。'}
 
 
-def after_match_payee(state: State):
-    return 'assign_transfer_request_id' if state['status'] == 'PAYEE_FOUND' else END
+def after_resolve_recipient(state: State):
+    if state['status'] == 'RECIPIENT_SELECTED':
+        return 'confirm_recipient'
+    if state['status'] == 'RECIPIENT_CHOICES':
+        return 'wait_for_recipient_selection'
+    return END
+
+
+def wait_for_recipient_selection(state: State) -> dict:
+    """Human selects a Java-returned candidate. No bank write in interrupt node."""
+    selected_id = interrupt({
+        'kind': 'RECIPIENT_SELECTION',
+        'choices': state['recipientChoices'],
+        'notice': '请选择收款对象。收款账户由银行提供，模型不能替你选择。',
+    })
+    if selected_id is False:
+        return {'status': 'REJECTED', 'details': '已放弃选择收款人，本次没有创建银行转账订单。'}
+    if type(selected_id) is not int:
+        return {'status': 'RECIPIENT_INVALID_SELECTION', 'details': '选择必须是银行候选用户编号。'}
+    matches = [x for x in state['recipientChoices'] if x['recipientId'] == selected_id]
+    if len(matches) != 1:
+        return {'status': 'RECIPIENT_INVALID_SELECTION', 'details': '选择不在银行候选列表中，未创建订单。'}
+    return {'status': 'RECIPIENT_SELECTED', 'selectedRecipient': matches[0]}
+
+
+def after_recipient_selection(state: State):
+    return 'confirm_recipient' if state['status'] == 'RECIPIENT_SELECTED' else END
+
+
+async def confirm_recipient(state: State, runtime: Runtime[Context]) -> dict:
+    """Upsert a saved payee through Java; cross-check bank identity again."""
+    choice = state['selectedRecipient']
+    payee = await bank.confirm_registered_recipient(
+        choice['recipientId'], runtime.context['authorization'])
+    if (payee['payeeName'].strip() != choice['payeeName']
+            or payee['payeeAccountMasked'] != choice['accountMasked']):
+        raise bank.BankError('银行确认收款账户与已选对象不一致，未创建转账订单。', 409)
+    task = next(t for t in state['plan']['tasks'] if t['type'] in ('transfer_prepare', 'schedule_transfer'))
+    return {'status': 'PAYEE_FOUND', 'transferCandidate': {
+        'id': payee['id'], 'payeeName': payee['payeeName'],
+        'accountMasked': payee['payeeAccountMasked'],
+        'amount': task['amount'], 'remark': task.get('remark') or '',
+        'executeAt': task.get('execute_at') if task['type'] == 'schedule_transfer' else None,
+    }}
+
+
+def after_confirm_recipient(state: State):
+    return ('assign_schedule_prepare_request_id' if any(t['type'] == 'schedule_transfer' for t in state['plan']['tasks'])
+            else 'assign_transfer_request_id')
 
 
 def assign_transfer_request_id(state: State) -> dict:
@@ -341,9 +406,189 @@ async def prepare_transfer_node(state: State, runtime: Runtime[Context]) -> dict
 
 
 
+# AA: prepare a bank-owned draft, then interrupt BEFORE publishing to payers.
+# Recipient payments happen later under each payer's own login and never here.
+def assign_aa_prepare_request_id(state: State) -> dict:
+    return {'aaPrepareRequestId': uuid4().hex}
+
+
+async def aa_prepare_node(state: State, runtime: Runtime[Context]) -> dict:
+    task = next(t for t in state['plan']['tasks'] if t['type'] == 'create_aa_collection')
+    draft = await bank.aa_prepare(task['aa_participants'], task['amount'],
+                                  task['aa_mode'], task.get('aa_reason') or '',
+                                  state['aaPrepareRequestId'], runtime.context['authorization'])
+    return {'aaDraft': draft, 'status': 'AA_DRAFT_READY'}
+
+
+def assign_aa_action_ids(state: State) -> dict:
+    return {'aaPublishRequestId': uuid4().hex, 'aaDiscardRequestId': uuid4().hex}
+
+
+def wait_aa_confirmation(state: State) -> dict:
+    decision = interrupt({
+        'kind': 'AA_COLLECTION', 'collectionId': state['aaDraft']['collectionId'],
+        'items': state['aaDraft']['items'],
+        'notice': '请确认要向这些用户发布AA收款请求。发布不会直接扣除他们的余额。',
+    })
+    if type(decision) is not bool:
+        return {'status': 'INVALID_APPROVAL', 'details': 'AA 发布必须由发起人明确确认。'}
+    return {'aaDecision': decision, 'status': 'AA_APPROVED' if decision else 'AA_DECLINED'}
+
+
+def after_aa_decision(state: State):
+    return 'aa_publish' if state['status'] == 'AA_APPROVED' else ('aa_discard' if state['status'] == 'AA_DECLINED' else END)
+
+
+def _aa_same_draft(before: dict, now: dict) -> bool:
+    return (before['collectionId'] == now['collectionId']
+            and before['initiatorId'] == now['initiatorId']
+            and before['totalAmount'] == now['totalAmount']
+            and before['requestedAmount'] == now['requestedAmount']
+            and [(i['itemId'], i['payerId'], i['amount']) for i in before['items']]
+                == [(i['itemId'], i['payerId'], i['amount']) for i in now['items']])
+
+
+async def aa_publish_node(state: State, runtime: Runtime[Context]) -> dict:
+    draft = state['aaDraft']
+    try:
+        value = await bank.aa_publish(draft['collectionId'], state['aaPublishRequestId'], runtime.context['authorization'])
+    except bank.BankError:
+        value = await bank.aa_get(draft['collectionId'], runtime.context['authorization'])
+        if value['status'] not in ('PUBLISHED', 'PARTIAL', 'COMPLETED'):
+            raise
+    if value['status'] not in ('PUBLISHED', 'PARTIAL', 'COMPLETED') or not _aa_same_draft(draft, value):
+        raise bank.BankError('银行没有确认 AA 按原始明细发布。', 409)
+    return {'aaDraft': value, 'status': 'AA_PUBLISHED_PENDING_VERIFY'}
+
+
+async def aa_verify_publish_node(state: State, runtime: Runtime[Context]) -> dict:
+    value = await bank.aa_get(state['aaDraft']['collectionId'], runtime.context['authorization'])
+    if value['status'] not in ('PUBLISHED', 'PARTIAL', 'COMPLETED') or not _aa_same_draft(state['aaDraft'], value):
+        raise bank.BankError('AA 发布结果未核实，不能宣称已发送。', 409)
+    return {'aaDraft': value, 'status': 'COMPLETED', 'details': 'AA 收款请求已发布，等待接收用户登录确认付款。'}
+
+
+async def aa_discard_node(state: State, runtime: Runtime[Context]) -> dict:
+    draft = state['aaDraft']
+    try:
+        value = await bank.aa_cancel_draft(draft['collectionId'], state['aaDiscardRequestId'], runtime.context['authorization'])
+    except bank.BankError:
+        value = await bank.aa_get(draft['collectionId'], runtime.context['authorization'])
+        if value['status'] != 'CANCELLED':
+            raise
+    if value['status'] != 'CANCELLED' or not _aa_same_draft(draft, value):
+        raise bank.BankError('银行未确认 AA 草稿已撤销。', 409)
+    return {'aaDraft': value, 'status': 'REJECTED', 'details': '已取消 AA 草稿，其他用户未收到收款请求。'}
+
+
+
+# Stage 4: the bank owns the future schedule. No Python timer or transfer execute.
+def assign_schedule_prepare_request_id(state: State) -> dict:
+    return {'scheduledPrepareRequestId': uuid4().hex}
+
+
+async def schedule_prepare_node(state: State, runtime: Runtime[Context]) -> dict:
+    c = state['transferCandidate']
+    result = await bank.scheduled_prepare(c['id'], c['amount'], c['executeAt'],
+                                          c['remark'], state['scheduledPrepareRequestId'],
+                                          runtime.context['authorization'])
+    _scheduled_check(state, result)
+    if result['status'] != 'PENDING_AUTH':
+        raise bank.BankError('银行预约没有进入待OTP授权状态。', 409)
+    return {'scheduledDraft': result, 'status': 'SCHEDULE_PENDING_AUTH'}
+
+
+def _scheduled_check(state: State, result: dict) -> None:
+    from decimal import Decimal
+    c = state['transferCandidate']
+    previous = state.get('scheduledDraft') or result
+    try:
+        matches = (result['scheduleId'] == previous['scheduleId']
+                   and result['payeeName'] == c['payeeName']
+                   and result['accountMasked'] == c['accountMasked']
+                   and Decimal(result['amount']) == Decimal(c['amount'])
+                   and result['remark'] == c['remark']
+                   and result['executeAt'] == c['executeAt'])
+    except (KeyError, ValueError, TypeError, ArithmeticError):
+        matches = False
+    if not matches:
+        raise bank.BankError('银行预约内容与用户确认的内容不一致。', 409)
+
+
+def assign_schedule_action_ids(state: State) -> dict:
+    return {'scheduledAuthorizeRequestId': uuid4().hex, 'scheduledCancelRequestId': uuid4().hex}
+
+
+def wait_schedule_confirmation(state: State) -> dict:
+    decision = interrupt({
+        'kind': 'SCHEDULE_TRANSFER', 'scheduleId': state['scheduledDraft']['scheduleId'],
+        'notice': '请核对固定金额、收款人及时间，并申请 OTP 完成预约专属预授权；此时不扣款。',
+    })
+    if type(decision) is not bool:
+        return {'status': 'INVALID_APPROVAL', 'details': '预约必须明确确认。'}
+    return {'scheduledDecision': decision, 'status': 'SCHEDULE_APPROVED' if decision else 'SCHEDULE_DECLINED'}
+
+
+def after_schedule_confirmation(state: State):
+    return 'schedule_authorize' if state['status'] == 'SCHEDULE_APPROVED' else ('schedule_discard' if state['status'] == 'SCHEDULE_DECLINED' else END)
+
+
+async def schedule_authorize_node(state: State, runtime: Runtime[Context]) -> dict:
+    """Verify prior explicit user OTP approval; do not POST again inside graph.
+
+    OTP authorization is performed at the authenticated resume boundary BEFORE
+    the interrupt checkpoint advances, so a wrong OTP permits a safe retry.
+    """
+    sid = state['scheduledDraft']['scheduleId']
+    result = await bank.scheduled_get(sid, runtime.context['authorization'])
+    _scheduled_check(state, result)
+    if result['status'] not in ('SCHEDULED', 'SUCCESS'):
+        raise bank.BankError('银行未确认预约已授权。', 409)
+    return {'scheduledDraft': result, 'status': 'SCHEDULE_VERIFY_PENDING'}
+
+
+async def schedule_verify_node(state: State, runtime: Runtime[Context]) -> dict:
+    result = await bank.scheduled_get(state['scheduledDraft']['scheduleId'], runtime.context['authorization'])
+    _scheduled_check(state, result)
+    # Near-immediate appointment may already have executed before GET.
+    if result['status'] not in ('SCHEDULED', 'SUCCESS'):
+        raise bank.BankError('预约结果尚未确认，请查询原预约状态。', 409)
+    return {'scheduledDraft': result, 'status': 'COMPLETED',
+            'details': '预约预授权已完成；实际扣款只会在预约时间到达、银行确认执行成功后发生。'}
+
+
+async def schedule_discard_node(state: State, runtime: Runtime[Context]) -> dict:
+    sid = state['scheduledDraft']['scheduleId']
+    try:
+        result = await bank.scheduled_cancel(sid, state['scheduledCancelRequestId'], runtime.context['authorization'])
+    except bank.BankError:
+        result = await bank.scheduled_get(sid, runtime.context['authorization'])
+        if result['status'] != 'CANCELLED':
+            raise
+    _scheduled_check(state, result)
+    if result['status'] != 'CANCELLED':
+        raise bank.BankError('银行未确认取消预约草稿。', 409)
+    return {'scheduledDraft': result, 'status': 'REJECTED', 'details': '用户未授权，本次预约已取消。'}
+
 
 builder = StateGraph(State, context_schema=Context)
-builder.add_node('match_payee', match_payee)
+builder.add_node('assign_schedule_prepare_request_id', assign_schedule_prepare_request_id)
+builder.add_node('schedule_prepare', schedule_prepare_node)
+builder.add_node('assign_schedule_action_ids', assign_schedule_action_ids)
+builder.add_node('wait_schedule_confirmation', wait_schedule_confirmation)
+builder.add_node('schedule_authorize', schedule_authorize_node)
+builder.add_node('schedule_verify', schedule_verify_node)
+builder.add_node('schedule_discard', schedule_discard_node)
+builder.add_node('assign_aa_prepare_request_id', assign_aa_prepare_request_id)
+builder.add_node('aa_prepare', aa_prepare_node)
+builder.add_node('assign_aa_action_ids', assign_aa_action_ids)
+builder.add_node('wait_aa_confirmation', wait_aa_confirmation)
+builder.add_node('aa_publish', aa_publish_node)
+builder.add_node('aa_verify_publish', aa_verify_publish_node)
+builder.add_node('aa_discard', aa_discard_node)
+builder.add_node('resolve_registered_recipient', resolve_registered_recipient)
+builder.add_node('wait_for_recipient_selection', wait_for_recipient_selection)
+builder.add_node('confirm_recipient', confirm_recipient)
 builder.add_node('assign_transfer_request_id', assign_transfer_request_id)
 builder.add_node('prepare_transfer', prepare_transfer_node)
 builder.add_node('assign_transfer_approval_ids', assign_transfer_approval_ids)
@@ -369,12 +614,32 @@ builder.add_node('reject', reject_node)
 builder.add_node('verify_rejected', verify_rejected)
 builder.add_edge(START, 'plan')
 builder.add_edge('plan', 'validate')
-builder.add_conditional_edges('validate', dispatch_reads, ['execute_read', END])
+builder.add_conditional_edges('validate', dispatch_reads, ['execute_read', 'summarize_reads', END])
 builder.add_edge('execute_read', 'summarize_reads')
+builder.add_edge('assign_schedule_prepare_request_id', 'schedule_prepare')
+builder.add_edge('schedule_prepare', 'assign_schedule_action_ids')
+builder.add_edge('assign_schedule_action_ids', 'wait_schedule_confirmation')
+builder.add_conditional_edges('wait_schedule_confirmation', after_schedule_confirmation,
+                              ['schedule_authorize', 'schedule_discard', END])
+builder.add_edge('schedule_authorize', 'schedule_verify')
+builder.add_edge('schedule_verify', END)
+builder.add_edge('schedule_discard', END)
+builder.add_edge('assign_aa_prepare_request_id', 'aa_prepare')
+builder.add_edge('aa_prepare', 'assign_aa_action_ids')
+builder.add_edge('assign_aa_action_ids', 'wait_aa_confirmation')
+builder.add_conditional_edges('wait_aa_confirmation', after_aa_decision,
+                              ['aa_publish', 'aa_discard', END])
+builder.add_edge('aa_publish', 'aa_verify_publish')
+builder.add_edge('aa_verify_publish', END)
+builder.add_edge('aa_discard', END)
 builder.add_conditional_edges('summarize_reads', after_reads,
-                              ['match_target', 'match_payee', END])
-builder.add_conditional_edges('match_payee', after_match_payee,
-                              ['assign_transfer_request_id', END])
+                              ['match_target', 'resolve_registered_recipient', 'assign_aa_prepare_request_id', END])
+builder.add_conditional_edges('resolve_registered_recipient', after_resolve_recipient,
+                              ['confirm_recipient', 'wait_for_recipient_selection', END])
+builder.add_conditional_edges('wait_for_recipient_selection', after_recipient_selection,
+                              ['confirm_recipient', END])
+builder.add_conditional_edges('confirm_recipient', after_confirm_recipient,
+                              ['assign_transfer_request_id', 'assign_schedule_prepare_request_id'])
 builder.add_edge('assign_transfer_request_id', 'prepare_transfer')
 builder.add_edge('prepare_transfer', 'assign_transfer_approval_ids')
 builder.add_edge('assign_transfer_approval_ids', 'wait_for_transfer_approval')

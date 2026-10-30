@@ -447,3 +447,266 @@ async def reject_subscription_cancellation(
 
     return response
 
+
+
+# Day 7: Proposed Java API contract. Do not simulate authenticated success.
+AUTH_URL = os.getenv("BANK_AUTH_API_BASE", "http://127.0.0.1:8080/api/auth").rstrip("/")
+
+
+async def register_user(payload: dict) -> dict:
+    data = await _request("POST", f"{AUTH_URL}/register", None, payload)
+    if (not isinstance(data, dict) or type(data.get("userId")) is not int
+            or data["userId"] <= 0 or data.get("status") != "REGISTERED"):
+        raise BankError("银行注册结果格式不正确。", 502)
+    return {"userId": data["userId"], "status": "REGISTERED"}
+
+
+async def login_user(username: str, password: str) -> dict:
+    data = await _request("POST", f"{AUTH_URL}/login", None,
+                          {"username": username, "password": password})
+    if (not isinstance(data, dict) or not isinstance(data.get("token"), str)
+            or not data["token"] or data.get("tokenType") != "Bearer"
+            or type(data.get("expiresInSeconds")) is not int
+            or data["expiresInSeconds"] <= 0):
+        raise BankError("银行登录结果格式不正确。", 502)
+    if not isinstance(data.get("displayName"), str) or not data["displayName"].strip():
+        raise BankError("银行登录用户信息格式不正确。", 502)
+    return data
+
+
+async def current_user(bearer: str | None) -> dict:
+    if not bearer:
+        raise BankError("请先登录。", 401)
+    data = await _request("GET", f"{AUTH_URL}/me", bearer)
+    if (not isinstance(data, dict) or type(data.get("userId")) is not int
+            or data["userId"] <= 0 or not isinstance(data.get("displayName"), str)
+            or not data["displayName"].strip()):
+        raise BankError("银行当前用户信息格式不正确。", 502)
+    return data
+
+
+async def logout_user(bearer: str | None) -> dict:
+    if not bearer:
+        raise BankError("请先登录。", 401)
+    data = await _request("POST", f"{AUTH_URL}/logout", bearer)
+    if not isinstance(data, dict) or data.get("status") != "logged_out":
+        raise BankError("无法确认登录凭证已撤销，请检查登录状态。", 502)
+    return data
+
+
+async def search_registered_recipients(bearer: str | None, *, name: str | None = None,
+                                       phone: str | None = None) -> list[dict]:
+    """Bank-authoritative, current-user scoped directory search. Never trust model IDs."""
+    if not bearer:
+        raise BankError('请先登录。', 401)
+    if not name and not phone:
+        raise BankError('需要收款人姓名或手机号。', 400)
+    if name and (len(name) > 50 or not name.strip()):
+        raise BankError('收款人姓名无效。', 400)
+    if phone and not re.fullmatch(r'1[3-9]\d{9}', phone):
+        raise BankError('手机号格式无效。', 400)
+    query = urlencode({k: v for k, v in (('name', name), ('phone', phone)) if v})
+    items = await _request('GET', f'{TRANSFER_URL}/recipients/search?{query}', bearer)
+    if not isinstance(items, list) or len(items) > 30:
+        raise BankError('银行收款人目录响应异常。', 502)
+    results, seen = [], set()
+    for item in items:
+        if (not isinstance(item, dict) or type(item.get('recipientId')) is not int
+                or item['recipientId'] <= 0 or not isinstance(item.get('payeeName'), str)
+                or not item['payeeName'].strip() or not isinstance(item.get('accountMasked'), str)
+                or not item['accountMasked'].strip()):
+            raise BankError('银行收款人目录包含不合法的候选资料。', 502)
+        if (name and item['payeeName'].strip() != name.strip()) or (item['recipientId'] in seen):
+            raise BankError('银行收款人目录结果与查询不一致。', 502)
+        seen.add(item['recipientId'])
+        results.append({'recipientId': item['recipientId'],
+                        'payeeName': item['payeeName'].strip(),
+                        'accountMasked': item['accountMasked']})
+    return results
+
+
+async def confirm_registered_recipient(recipient_id: int, bearer: str | None) -> dict:
+    """Java rechecks recipient then returns existing or upserted current-user payeeId."""
+    if not bearer or type(recipient_id) is not int or recipient_id <= 0:
+        raise BankError('收款人选择不合法。', 400)
+    value = await _request('POST', f'{TRANSFER_URL}/recipients/confirm', bearer,
+                           {'recipientId': recipient_id})
+    if (not isinstance(value, dict) or type(value.get('id')) is not int or value['id'] <= 0
+            or not isinstance(value.get('payeeName'), str)
+            or not isinstance(value.get('payeeAccountMasked'), str)):
+        raise BankError('银行未返回可信的收款人绑定结果。', 502)
+    return value
+
+
+# Day 7 stage 3: AA collection is bank-owned. This API never lets the
+# originator authorize or debit another account.
+AA_URL = os.getenv('BANK_AA_API_BASE', 'http://127.0.0.1:8080/api/aa').rstrip('/')
+
+
+def _aa_view(value: Any) -> dict:
+    if (not isinstance(value, dict) or not isinstance(value.get('collectionId'), str)
+            or not ORDER_RE.fullmatch(value['collectionId'])
+            or value.get('status') not in ('DRAFT', 'PUBLISHED', 'CANCELLED', 'PARTIAL', 'COMPLETED')
+            or type(value.get('initiatorId')) is not int
+            or not isinstance(value.get('items'), list)):
+        raise BankError('AA 银行收款单响应无效。', 502)
+    for item in value['items']:
+        if (not isinstance(item, dict) or not isinstance(item.get('itemId'), str)
+                or not ORDER_RE.fullmatch(item['itemId'])
+                or type(item.get('payerId')) is not int
+                or item.get('status') not in ('PENDING', 'PAYING', 'PAID', 'DECLINED', 'FAILED')
+                or not isinstance(item.get('amount'), str)):
+            raise BankError('AA 银行付款明细无效。', 502)
+    return value
+
+
+async def aa_prepare(people: list[str], amount: str, mode: str, reason: str,
+                     request_id: str, bearer: str | None) -> dict:
+    if not bearer or not people or mode not in ('total_with_self', 'per_person'):
+        raise BankError('AA 发起参数不完整。', 400)
+    value = await _request('POST', f'{AA_URL}/prepare', bearer,
+                           {'participants': people, 'amount': amount,
+                            'splitMode': mode, 'reason': reason, 'requestId': request_id})
+    value = _aa_view(value)
+    if value['status'] != 'DRAFT' or len(value['items']) != len(people):
+        raise BankError('银行没有正确创建待确认 AA 明细。', 502)
+    return value
+
+
+async def aa_get(collection_id: str, bearer: str | None) -> dict:
+    return _aa_view(await _request('GET', f'{AA_URL}/{_oid(collection_id)}', bearer))
+
+
+async def aa_publish(collection_id: str, request_id: str, bearer: str | None) -> dict:
+    return _aa_view(await _request('POST', f'{AA_URL}/{_oid(collection_id)}/publish', bearer,
+                                   {'requestId': request_id}))
+
+
+async def aa_cancel_draft(collection_id: str, request_id: str, bearer: str | None) -> dict:
+    return _aa_view(await _request('POST', f'{AA_URL}/{_oid(collection_id)}/cancel-draft', bearer,
+                                   {'requestId': request_id}))
+
+
+async def aa_outgoing(bearer: str | None) -> list[dict]:
+    value = await _request('GET', f'{AA_URL}/outgoing', bearer)
+    if not isinstance(value, list):
+        raise BankError('银行 AA 发起列表响应无效。', 502)
+    return [_aa_view(x) for x in value]
+
+
+async def aa_inbox(bearer: str | None) -> list[dict]:
+    value = await _request('GET', f'{AA_URL}/inbox', bearer)
+    if not isinstance(value, list):
+        raise BankError('银行 AA 待付款列表响应无效。', 502)
+    for item in value:
+        if (not isinstance(item, dict) or not ORDER_RE.fullmatch(str(item.get('itemId', '')))
+                or item.get('status') not in ('PENDING', 'PAYING', 'PAID', 'DECLINED', 'FAILED')
+                or not isinstance(item.get('amount'), str)):
+            raise BankError('银行 AA 待付款明细格式无效。', 502)
+    return value
+
+
+async def aa_payment_prepare(item_id: str, request_id: str, bearer: str | None) -> dict:
+    value = await _request('POST', f'{AA_URL}/items/{_oid(item_id)}/payment/prepare', bearer,
+                           {'requestId': request_id})
+    if (not isinstance(value, dict) or not value.get('orderId')
+            or value.get('status') != 'PENDING_APPROVAL'
+            or value.get('riskLevel') not in ('YELLOW', 'RED')):
+        raise BankError('AA 付款订单未进入银行审批状态。', 502)
+    return value
+
+
+async def aa_payment_otp(item_id: str, bearer: str | None) -> dict:
+    return await _request('POST', f'{AA_URL}/items/{_oid(item_id)}/otp/request', bearer)
+
+
+async def aa_payment_confirm(item_id: str, request_id: str, otp: str | None,
+                             bearer: str | None) -> dict:
+    value = await _request('POST', f'{AA_URL}/items/{_oid(item_id)}/payment/confirm', bearer,
+                           {'requestId': request_id, 'confirmed': True, 'otpCode': otp})
+    if not isinstance(value, dict) or value.get('status') != 'PAID' or not value.get('transferOrderId'):
+        raise BankError('银行未确认 AA 付款及交易流水完成。', 502)
+    return value
+
+
+async def aa_decline(item_id: str, request_id: str, bearer: str | None) -> dict:
+    value = await _request('POST', f'{AA_URL}/items/{_oid(item_id)}/decline', bearer,
+                           {'requestId': request_id})
+    if not isinstance(value, dict) or value.get('status') != 'DECLINED':
+        raise BankError('银行尚未确认 AA 拒绝。', 502)
+    return value
+
+
+async def aa_payment_get(item_id: str, bearer: str | None) -> dict:
+    value = await _request('GET', f'{AA_URL}/items/{_oid(item_id)}/payment', bearer)
+    if not isinstance(value, dict) or not value.get('orderId') or value.get('status') not in ('PENDING_APPROVAL', 'AUTHORIZED', 'SUCCESS', 'FAILED', 'CANCELLED'):
+        raise BankError('AA 原付款订单数据无效。', 502)
+    return value
+
+# Stage 4: scheduled transfers use bank-owned durable authorization and execution.
+# In mock mode, default to the configured mock service host to avoid an AA-like 8080 mismatch.
+_SCHEDULE_DEFAULT = ((READ_URL.rsplit('/api/demo', 1)[0] if BANK_MODE == 'mock'
+                      else TRANSFER_URL.rsplit('/api/transfers', 1)[0])
+                     + '/api/scheduled-transfers')
+SCHEDULE_URL = os.getenv('BANK_SCHEDULE_API_BASE', _SCHEDULE_DEFAULT).rstrip('/')
+
+
+def _schedule(value: Any) -> dict:
+    if (not isinstance(value, dict) or not isinstance(value.get('scheduleId'), str)
+            or value.get('status') not in ('PENDING_AUTH', 'SCHEDULED', 'PROCESSING',
+                                           'SUCCESS', 'FAILED', 'CANCELLED', 'MISSED', 'UNKNOWN')
+            or not isinstance(value.get('amount'), str)
+            or not isinstance(value.get('executeAt'), str)):
+        raise BankError('银行预约返回数据格式不正确。')
+    return value
+
+
+async def scheduled_prepare(payee_id: int, amount: str, execute_at: str, remark: str,
+                            request_id: str, bearer: str | None) -> dict:
+    if not bearer:
+        raise BankError('请先登录。', 401)
+    return _schedule(await _request('POST', f'{SCHEDULE_URL}/prepare', bearer, {
+        'payeeId': payee_id, 'amount': amount, 'executeAt': execute_at,
+        'remark': remark, 'requestId': request_id,
+    }))
+
+
+async def scheduled_get(schedule_id: str, bearer: str | None) -> dict:
+    if not bearer:
+        raise BankError('请先登录。', 401)
+    return _schedule(await _request('GET', f'{SCHEDULE_URL}/{_oid(schedule_id)}', bearer))
+
+
+async def scheduled_list(bearer: str | None) -> list[dict]:
+    if not bearer:
+        raise BankError('请先登录。', 401)
+    response = await _request('GET', f'{SCHEDULE_URL}/mine', bearer)
+    if not isinstance(response, list):
+        raise BankError('银行预约列表格式不正确。')
+    return [_schedule(v) for v in response]
+
+
+async def scheduled_otp_request(schedule_id: str, bearer: str | None) -> dict:
+    if not bearer:
+        raise BankError('请先登录。', 401)
+    res = await _request('POST', f'{SCHEDULE_URL}/{_oid(schedule_id)}/otp/request', bearer)
+    if not isinstance(res, dict) or res.get('scheduleId') != schedule_id or not isinstance(res.get('expiresInSeconds'), int):
+        raise BankError('预约 OTP 返回数据无效。')
+    return res
+
+
+async def scheduled_authorize(schedule_id: str, request_id: str, otp_code: str,
+                              bearer: str | None) -> dict:
+    if not bearer or not re.fullmatch(r'\d{6}', otp_code):
+        raise BankError('预约必须由本人完成六位 OTP 强验证。', 422)
+    return _schedule(await _request('POST', f'{SCHEDULE_URL}/{_oid(schedule_id)}/authorize', bearer, {
+        'requestId': request_id, 'confirmed': True, 'otpCode': otp_code,
+    }))
+
+
+async def scheduled_cancel(schedule_id: str, request_id: str, bearer: str | None) -> dict:
+    if not bearer:
+        raise BankError('请先登录。', 401)
+    return _schedule(await _request('POST', f'{SCHEDULE_URL}/{_oid(schedule_id)}/cancel', bearer, {
+        'requestId': request_id,
+    }))

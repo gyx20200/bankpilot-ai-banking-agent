@@ -8,7 +8,7 @@ def test_all_existing_business_tasks_are_registered():
     assert set(TASK_REGISTRY) == {
         "get_balance", "get_transactions", "get_payees",
         "monthly_analytics", "list_subscriptions", "transfer_prepare",
-        "cancel_subscription",
+        "cancel_subscription", "create_aa_collection", "schedule_transfer",
     }
 
 
@@ -22,10 +22,13 @@ def test_legacy_llm_tool_names_are_mapped_correctly():
 def test_task_parameters_and_risks():
     assert TASK_REGISTRY["monthly_analytics"].required_params == ("month",)
     assert TASK_REGISTRY["cancel_subscription"].required_params == ("target_name",)
-    assert TASK_REGISTRY["transfer_prepare"].required_params == ("payee_name", "amount")
+    assert TASK_REGISTRY["transfer_prepare"].required_params == ("payee_name", "payee_phone", "amount", "remark")
     assert TASK_REGISTRY["get_balance"].risk_level == "LOW"
     assert TASK_REGISTRY["cancel_subscription"].risk_level == "MEDIUM"
     assert TASK_REGISTRY["transfer_prepare"].risk_level == "HIGH"
+    assert TASK_REGISTRY["schedule_transfer"].risk_level == "HIGH"
+    assert TASK_REGISTRY["create_aa_collection"].risk_level == "MEDIUM"
+    assert TASK_REGISTRY["create_aa_collection"].required_params == ("aa_participants", "aa_mode", "amount", "aa_reason")
 
 
 def test_all_dependencies_are_registered():
