@@ -1,0 +1,107 @@
+/*
+ * BankPilot Authentication v3 — standalone presentation layer.
+ * Loaded AFTER style.css; intentionally restricted to .bp-auth-shell.
+ * No authentication request, validation or token behavior is modified here.
+ * Crisp 100% vector architecture replaces the previous 598px cropped JPG.
+ */
+.bp-auth-shell{width:100%;min-width:0;overflow:hidden;background:#edf5ff}
+.bp-auth-shell .bp-main{width:100%;min-width:0;min-height:100vh;height:100vh;display:flex;flex-direction:column;background:#f1f7ff}
+.bp-auth-shell .auth-site-header{box-sizing:border-box;flex:0 0 76px;width:100%;height:76px;min-height:76px;padding:0 clamp(36px,4vw,74px);display:flex;align-items:center;justify-content:space-between;gap:22px;background:rgba(255,255,255,.985);border-bottom:1px solid #e6edf5;box-shadow:none}
+.bp-auth-shell .auth-site-brand{display:flex;align-items:center;gap:12px;min-width:0}
+.bp-auth-shell .auth-brand-symbol{width:43px;height:43px;flex:0 0 43px;display:block}
+.bp-auth-shell .auth-site-brand strong{font-size:28px;font-weight:820;letter-spacing:-.7px;line-height:1.1;color:#0b2046;white-space:nowrap}
+.bp-auth-shell .auth-site-divider{display:block;height:27px;width:1px;background:#96acc9;margin:0 9px}
+.bp-auth-shell .auth-site-name{font-size:20px;line-height:1.3;color:#172c4d;white-space:nowrap}
+.bp-auth-shell .auth-site-status{display:inline-flex;align-items:center;gap:10px;padding:10px 17px;border-radius:24px;background:#eaf8f1;color:#188b62;font-size:14px;white-space:nowrap;font-weight:700}
+.bp-auth-shell .auth-site-status:has(.status-led.unavailable){background:#fff4e7;color:#9a6818}
+.bp-auth-shell .auth-site-status .status-led{width:9px;height:9px;border-radius:50%;background:#15ae78;box-shadow:0 0 0 3px rgba(25,176,116,.12)}
+.bp-auth-shell .auth-site-status .status-led.unavailable{background:#e8a540;box-shadow:0 0 0 3px rgba(233,164,57,.13)}
+.bp-auth-shell .bp-content.auth-content{position:relative;display:block;flex:1;min-height:0;max-width:none;width:100%;padding:0;margin:0;overflow-y:auto;overflow-x:hidden;background:#eaf4ff;scrollbar-color:#c6d8ed transparent}
+.bp-auth-shell .auth-landing{position:relative;isolation:isolate;display:grid;grid-template-columns:minmax(0,1fr) minmax(410px,535px);column-gap:clamp(42px,5.5vw,108px);align-items:center;max-width:none;width:100%;min-height:100%;margin:0;box-sizing:border-box;padding:25px clamp(50px,6vw,120px) 47px;background:linear-gradient(90deg,rgba(250,253,255,.20),rgba(235,245,255,.08)),url('./assets/auth-city.svg') center bottom / cover no-repeat #d4eaff}
+.bp-auth-shell .auth-landing::before{content:""!important;display:block!important;position:absolute;z-index:0;pointer-events:none;left:37%;top:0;bottom:0;width:min(30vw,475px);height:100%;transform:none;box-shadow:none;opacity:.83;background:url('./assets/auth-building-layer.png') center bottom / 100% auto no-repeat!important;mask-image:none;-webkit-mask-image:none}
+.bp-auth-shell .auth-landing::after{display:none!important;content:none!important;background:none!important}
+.bp-auth-shell .auth-hero{position:relative;z-index:1;align-self:center;width:100%;max-width:720px;min-width:0;padding:0;margin:3px 0 0}
+.bp-auth-shell .auth-hero-eyebrow{display:block;margin:0 0 25px;font-size:16px;line-height:1.3;letter-spacing:.22em;font-weight:800;color:#1765d4}
+.bp-auth-shell .auth-hero h2,.bp-auth-shell .auth-landing .auth-hero h2{margin:0;color:#0c2247;font-size:clamp(54px,4.8vw,76px);line-height:1.18;letter-spacing:-.048em;font-weight:850}
+.bp-auth-shell .auth-hero h2 span{color:#1266e4;-webkit-text-fill-color:#1266e4;background:none}
+.bp-auth-shell .auth-hero-description{max-width:630px;margin:26px 0 0;font-size:clamp(16px,1.15vw,19px);line-height:1.85;font-weight:450;color:#506a90}
+.bp-auth-shell .auth-hero-rule{display:none}
+.bp-auth-shell .auth-features{display:flex;flex-direction:column;gap:24px;margin:39px 0 0}
+.bp-auth-shell .auth-feature{display:flex;align-items:center;gap:17px;min-height:62px}
+.bp-auth-shell .auth-feature-icon{display:grid;place-items:center;flex:0 0 57px;width:57px;height:57px;background:rgba(230,241,255,.93);border:1px solid rgba(255,255,255,.9);border-radius:50%;box-shadow:none;color:#126ce8}
+.bp-auth-shell .auth-feature-icon svg{width:26px;height:26px}
+.bp-auth-shell .auth-feature strong{display:block;color:#132c4e;font-size:17px;font-weight:760;line-height:1.35}
+.bp-auth-shell .auth-feature p{font-size:14px;line-height:1.6;margin:5px 0 0;color:#657e9d}
+.bp-auth-shell .auth-panel,.bp-auth-shell .auth-landing .auth-panel{position:relative;z-index:1;justify-self:end;align-self:start;width:100%;max-width:535px;min-width:0;margin:20px 0 0;padding:38px 42px 30px;border-radius:16px;border:1px solid rgba(227,236,248,.85);background:#fff;box-shadow:0 15px 38px rgba(41,82,140,.065);backdrop-filter:none}
+.bp-auth-shell .auth-panel h1,.bp-auth-shell .auth-landing .auth-panel h1{margin:0 0 13px;font-size:31px;line-height:1.35;letter-spacing:-.025em;text-align:center;color:#0f2142;font-weight:800}
+.bp-auth-shell .auth-subtitle{margin:0 0 27px;font-size:15px;line-height:1.75;text-align:center;color:#778ba8}
+.bp-auth-shell .auth-tabs{display:grid;grid-template-columns:1fr 1fr;gap:0;margin:0 0 24px;padding:0;border:0;border-bottom:1px solid #dce5f0;border-radius:0;background:transparent}
+.bp-auth-shell .auth-tabs button{height:48px;border:0;border-bottom:3px solid transparent;border-radius:0;background:transparent;font-size:17px;color:#7a8da9;font-weight:650;box-shadow:none}
+.bp-auth-shell .auth-tabs button.active{border:0;border-bottom:3px solid #126de7;border-radius:0;background:transparent;color:#0f67df;box-shadow:none}
+.bp-auth-shell .auth-form,.bp-auth-shell .auth-landing .auth-form{display:flex;flex-direction:column;gap:17px}
+.bp-auth-shell .auth-field label{display:block;margin:0 0 9px;color:#172a47;font-size:15px;font-weight:720}
+.bp-auth-shell .auth-input-wrap{position:relative;display:flex;align-items:center;width:100%}
+.bp-auth-shell .auth-form .auth-input-wrap input,.bp-auth-shell .auth-landing .auth-form .auth-input-wrap input{height:54px;width:100%;min-width:0;padding:0 44px 0 45px;font-size:15px;color:#183453;background:#fff;border:1px solid #cddbea;border-radius:9px;box-shadow:none}
+.bp-auth-shell .auth-form .auth-input-wrap input:focus{border-color:#438ce8;box-shadow:0 0 0 3px rgba(25,110,227,.13);outline:0}
+.bp-auth-shell .auth-form .auth-input-wrap input::placeholder{color:#96a8bc}
+.bp-auth-shell .auth-input-icon{width:20px;height:20px;left:15px;color:#6b86ad}
+.bp-auth-shell .auth-submit,.bp-auth-shell .auth-landing .auth-submit{width:100%;height:54px;margin:6px 0 0;border:1px solid #1265dc;border-radius:9px;background:linear-gradient(95deg,#348ef5,#1166ed);color:#fff;font-size:17px;box-shadow:0 7px 15px rgba(24,89,192,.12)}
+.bp-auth-shell .auth-mode-switch{display:flex;align-items:center;justify-content:center;gap:7px;margin:19px 0 0;font-size:14px;color:#8094af}
+.bp-auth-shell .auth-mode-switch button{font-size:14px;color:#1269df;font-weight:720}
+.bp-auth-shell .auth-card-divider{height:1px;margin-top:26px;background:#dfe8f3}
+.bp-auth-shell .auth-footnote{margin:17px 0 0;font-size:12px;line-height:1.7;color:#8294ab;text-align:center}
+.bp-auth-shell .auth-error,.bp-auth-shell .auth-notice{font-size:13px;line-height:1.55;padding:10px 12px;border-radius:8px;margin:0}
+/* Registration keeps all 5 real fields; only compact vertical spacing changes. */
+.bp-auth-shell .auth-panel:has(#bank-confirm-password){padding:27px 39px 24px;margin-top:12px}
+.bp-auth-shell .auth-panel:has(#bank-confirm-password) h1{font-size:29px;margin-bottom:8px}
+.bp-auth-shell .auth-panel:has(#bank-confirm-password) .auth-subtitle{margin-bottom:17px}
+.bp-auth-shell .auth-panel:has(#bank-confirm-password) .auth-tabs{margin-bottom:16px}
+.bp-auth-shell .auth-panel:has(#bank-confirm-password) .auth-form{gap:10px}
+.bp-auth-shell .auth-panel:has(#bank-confirm-password) .auth-field label{margin-bottom:5px;font-size:14px}
+.bp-auth-shell .auth-panel:has(#bank-confirm-password) .auth-form .auth-input-wrap input{height:46px}
+.bp-auth-shell .auth-panel:has(#bank-confirm-password) .auth-submit{height:49px;margin-top:4px}
+.bp-auth-shell .auth-panel:has(#bank-confirm-password) .auth-mode-switch{margin-top:12px}
+.bp-auth-shell .auth-panel:has(#bank-confirm-password) .auth-card-divider{margin-top:15px}
+.bp-auth-shell .auth-panel:has(#bank-confirm-password) .auth-footnote{margin-top:11px}
+@media(max-width:1300px){
+ .bp-auth-shell .auth-landing{grid-template-columns:minmax(0,1fr) minmax(380px,480px);column-gap:32px;padding-left:5%;padding-right:5%}
+ .bp-auth-shell .auth-hero h2,.bp-auth-shell .auth-landing .auth-hero h2{font-size:clamp(48px,4.65vw,67px)}
+ .bp-auth-shell .auth-panel,.bp-auth-shell .auth-landing .auth-panel{padding-left:33px;padding-right:33px}
+}
+@media(max-width:1000px){
+ .bp-auth-shell .auth-landing{grid-template-columns:minmax(0,1fr) minmax(360px,440px);gap:24px;padding:30px 4% 50px}
+ .bp-auth-shell .auth-hero h2,.bp-auth-shell .auth-landing .auth-hero h2{font-size:clamp(38px,4.6vw,51px)}
+ .bp-auth-shell .auth-hero-description{font-size:15px}
+ .bp-auth-shell .auth-features{gap:15px;margin-top:24px}
+ .bp-auth-shell .auth-feature-icon{width:47px;height:47px;flex-basis:47px}
+ .bp-auth-shell .auth-feature strong{font-size:15px}.bp-auth-shell .auth-feature p{font-size:12px}
+ .bp-auth-shell .auth-site-name{font-size:16px}
+}
+@media(max-width:800px){
+ .bp-auth-shell .auth-site-header{height:68px;min-height:68px;flex-basis:68px;padding:0 21px}
+ .bp-auth-shell .auth-site-brand strong{font-size:22px}
+ .bp-auth-shell .auth-brand-symbol{width:34px;height:34px;flex-basis:34px}
+ .bp-auth-shell .auth-site-name,.bp-auth-shell .auth-site-divider{display:none}
+ .bp-auth-shell .auth-site-status{font-size:11px;padding:8px 11px}
+ .bp-auth-shell .auth-landing::before{left:40%;width:52%;opacity:.45}
+ .bp-auth-shell .auth-landing{display:flex;flex-direction:column;align-items:stretch;gap:24px;padding:36px 22px 50px;background-position:60% bottom;background-size:auto 100%}
+ .bp-auth-shell .auth-hero{max-width:610px;width:100%;align-self:center}
+ .bp-auth-shell .auth-hero h2,.bp-auth-shell .auth-landing .auth-hero h2{font-size:clamp(34px,6.3vw,52px)}
+ .bp-auth-shell .auth-hero-description{margin-top:14px;font-size:14px}
+ .bp-auth-shell .auth-features{display:none}
+ .bp-auth-shell .auth-panel,.bp-auth-shell .auth-landing .auth-panel{margin:0 auto;align-self:center;justify-self:center;max-width:535px;width:100%}
+}
+@media(max-width:440px){
+ .bp-auth-shell .auth-site-header{padding:0 15px}
+ .bp-auth-shell .auth-site-brand strong{font-size:20px}
+ .bp-auth-shell .auth-landing::before{opacity:.22}
+ .bp-auth-shell .auth-landing{padding:25px 14px 40px}
+ .bp-auth-shell .auth-hero h2,.bp-auth-shell .auth-landing .auth-hero h2{font-size:35px}
+ .bp-auth-shell .auth-hero-description{font-size:13px}
+ .bp-auth-shell .auth-panel,.bp-auth-shell .auth-landing .auth-panel,.bp-auth-shell .auth-panel:has(#bank-confirm-password){padding:24px 19px}
+ .bp-auth-shell .auth-panel h1,.bp-auth-shell .auth-landing .auth-panel h1{font-size:25px}
+ .bp-auth-shell .auth-subtitle{font-size:13px}
+ .bp-auth-shell .auth-field label{font-size:14px}
+ .bp-auth-shell .auth-form .auth-input-wrap input{height:49px}
+}
+@media(prefers-reduced-motion:reduce){.bp-auth-shell *{transition:none!important}}

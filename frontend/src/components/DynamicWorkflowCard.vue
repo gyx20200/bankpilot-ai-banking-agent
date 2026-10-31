@@ -39,6 +39,7 @@ const showPayees = computed(() => payees.value && requested.value.has('get_payee
 const showSubscriptions = computed(() => subscriptions.value && requested.value.has('list_subscriptions'))
 const showMonthly = computed(() => monthly.value && requested.value.has('monthly_analytics'))
 const hasVisibleRead = computed(() => showBalance.value || showTransactions.value || showPayees.value || showSubscriptions.value || showMonthly.value)
+const readCount = computed(() => [showBalance, showTransactions, showPayees, showSubscriptions, showMonthly].filter(flag => Boolean(flag.value)).length)
 const technicalOpen = ref(false)
 const recipientChoices = computed(() => Array.isArray(props.task.recipientChoices) ? props.task.recipientChoices : [])
 const choosingRecipient = computed(() => status.value === 'WAITING_RECIPIENT_SELECTION' && recipientChoices.value.length > 1)
@@ -114,7 +115,7 @@ function reject(kind) {
 </script>
 
 <template>
-  <div class="workflow-results" aria-label="银行业务处理结果">
+  <div class="workflow-results" :class="{ 'has-multiple-reads': readCount >= 2 }" aria-label="银行业务处理结果">
     <div class="result-status-row">
       <span class="result-status-icon" :class="{ 'is-done': status === 'COMPLETED', 'is-waiting': isTransferPending || isCancellationPending || choosingRecipient || isAaPending || isSchedulePending }" aria-hidden="true">{{ status === 'COMPLETED' ? '✓' : (isTransferPending || isCancellationPending || choosingRecipient || isAaPending || isSchedulePending ? '·' : 'i') }}</span>
       <span class="result-status-text">{{ states[status] || '处理结果' }}</span>
@@ -163,14 +164,13 @@ function reject(kind) {
     </div>
 
     <div v-if="order" class="result-card transfer-card" aria-label="转账订单">
-      <div class="result-title"><span class="result-glyph blue" aria-hidden="true">↗</span><div><strong>模拟转账</strong><small>{{ order.status === 'SUCCESS' ? '银行已确认执行成功' : (order.status === 'CANCELLED' || order.status === 'REJECTED' ? '该笔转账已取消' : '请核对以下交易信息') }}</small></div><span class="risk-pill" :class="order.riskLevel === 'RED' ? 'risk-red' : 'risk-yellow'">{{ order.riskLevel === 'RED' ? '高风险 · OTP' : (order.riskLevel === 'YELLOW' ? '需人工确认' : (order.riskLevel || '待核查')) }}</span></div>
+      <div class="result-title"><span class="result-glyph blue" aria-hidden="true">↗</span><div><strong>模拟转账</strong><small>{{ order.status === 'SUCCESS' ? '银行已确认执行成功' : (order.status === 'CANCELLED' || order.status === 'REJECTED' ? '该笔转账已取消' : '请核对以下交易信息') }}</small></div><span class="risk-pill" :class="order.riskLevel === 'RED' ? 'risk-red' : order.riskLevel === 'YELLOW' ? 'risk-yellow' : 'risk-neutral'">{{ order.riskLevel === 'RED' ? '红色风险 · OTP' : (order.riskLevel === 'YELLOW' ? '黄色风险 · 需确认' : (order.riskLevel || '待核查')) }}</span></div>
       <div class="transfer-amount">{{ money(order.amount) }}</div>
       <div class="detail-grid"><div><span>收款人</span><strong>{{ order.payeeName || task.transferCandidate?.payeeName || '—' }}</strong></div><div><span>收款账户</span><strong>{{ order.accountMasked || task.transferCandidate?.accountMasked || '—' }}</strong></div><div v-if="order.remark || task.transferCandidate?.remark" class="transfer-remark"><span>转账备注</span><strong>{{ order.remark || task.transferCandidate?.remark }}</strong></div></div>
       <div class="order-current"><span>银行状态</span><strong :class="order.status === 'SUCCESS' ? 'state-success' : ''">{{ order.status === 'SUCCESS' ? '转账成功' : (order.status === 'PENDING_APPROVAL' ? '待批准' : (order.status || '核查中')) }}</strong></div>
-    </div>
 
-    <div v-if="isTransferPending" class="approval-card" aria-label="转账人工审批">
-      <div class="approval-heading"><span class="approval-mark" aria-hidden="true">!</span><div><strong>请确认这笔转账</strong><p>确认仅针对本笔转账，不代表同意其他业务。</p></div></div>
+    <div v-if="isTransferPending" class="approval-card transfer-approval" :class="{ 'approval-red': riskRed }" aria-label="转账人工审批">
+      <div class="approval-heading"><span class="approval-mark" aria-hidden="true">!</span><div><strong>{{ riskRed ? '高风险转账 · 需完成安全验证' : '请核对并确认本笔转账' }}</strong><p>{{ riskRed ? '本笔交易须完成 OTP 验证后才能提交。' : '本笔交易需要由你明确确认后执行。' }}</p></div></div>
       <div v-if="riskRed" class="otp-area">
         <div class="otp-head"><div><strong>银行安全验证</strong><small>高风险转账需要一次性验证码</small></div><button type="button" class="otp-request" :disabled="busy || locked" @click="emit('otpRequest', task.threadId)">申请验证码</button></div>
         <p v-if="otpNotice" class="otp-feedback" role="status">{{ otpNotice }}</p>
@@ -180,15 +180,15 @@ function reject(kind) {
       <label class="approval-check"><input v-model="confirmed" type="checkbox" :disabled="busy || locked" /> <span>我已核对收款人、金额及账户，明确批准这笔模拟转账。</span></label>
       <div class="approval-actions"><button class="approval-primary" type="button" :disabled="busy || locked || !confirmed || (riskRed && (!otpRequested || !/^\d{6}$/.test(otp)))" @click="approve('transfer')">{{ busy ? '处理中…' : '确认转账' }}</button><button class="approval-secondary" type="button" :disabled="busy || locked" @click="reject('transfer')">拒绝转账</button></div>
     </div>
-
+    </div>
 
     <div v-if="scheduled" class="result-card" aria-label="预约转账申请">
-      <div class="result-title"><span class="result-glyph blue">◷</span><div><strong>单次定时转账</strong><small>预约成功并不代表已扣款</small></div><span class="risk-pill risk-red">全部金额强制 OTP</span></div>
+      <div class="result-title"><span class="result-glyph blue">◷</span><div><strong>单次定时转账</strong><small>预约成功并不代表已扣款</small></div><span class="result-title-side">需 OTP 授权</span></div>
       <div class="transfer-amount">{{ money(scheduled.amount) }}</div>
       <div class="detail-grid"><div><span>收款人</span><strong>{{ scheduled.payeeName }}</strong></div><div><span>银行收款账户</span><strong>{{ scheduled.accountMasked }}</strong></div><div><span>预定执行时间</span><strong>{{ scheduled.executeAt?.replace('T', ' ') }}</strong></div><div><span>预约状态</span><strong>{{ scheduled.status }}</strong></div><div v-if="scheduled.remark"><span>备注</span><strong>{{ scheduled.remark }}</strong></div></div>
       <p class="soft-note">OTP 用于授权固定金额、收款人和执行时间；到期由银行执行。错过执行窗口不补执行，失败不自动重试。</p>
     </div>
-    <div v-if="isSchedulePending" class="approval-card" aria-label="定时转账强制OTP预授权">
+    <div v-if="isSchedulePending" class="approval-card approval-schedule" aria-label="定时转账强制OTP预授权">
       <div class="approval-heading"><span class="approval-mark">!</span><div><strong>请确认预约并完成强验证</strong><p>所有金额都必须提前 OTP。此时不会从账户扣款。</p></div></div>
       <div class="otp-area">
         <div class="otp-head"><div><strong>预约专属 OTP</strong><small>验证码只验证此笔固定预约，不会永久保存验证码</small></div><button type="button" class="otp-request" :disabled="busy || locked" @click="emit('otpRequest', task.threadId)">申请验证码</button></div>
@@ -277,4 +277,51 @@ function reject(kind) {
 .result-detail-note{font-size:12px;color:#596f84;line-height:1.7;padding:12px 15px;background:#f2f6fc;border-radius:10px;overflow-wrap:anywhere}.result-error,.result-lock{font-size:12px;line-height:1.7;padding:12px 14px;border-radius:10px}.result-error{background:#fff0f1;color:#b64040}.result-lock{background:#fff5df;color:#916519}
 .technical-details{font-size:11px;color:#94a2af;padding:1px 3px}.technical-details summary{cursor:pointer;display:inline-block;font-size:11px;color:#93a4b7}.technical-details>div{padding:5px 0;overflow-wrap:anywhere}
 @media(max-width:550px){.result-card{padding:16px}.approval-card{padding:16px}.detail-grid{grid-template-columns:1fr}.approval-actions button{flex:1}.result-title{gap:8px}.result-title-side,.risk-pill{font-size:10px}.result-line{gap:8px}}
+
+/* Bank-style results: slim borders, restrained typography, no decorative gradients. */
+.workflow-results{width:min(810px,100%);gap:13px;margin-top:13px;color:#172b46}
+.result-status-row{padding:0 2px 2px}
+.result-status-text{font-size:13px;color:#455c75}
+.result-card{border-radius:14px;padding:22px 24px;border-color:#dfe6ef;box-shadow:0 7px 25px rgba(26,54,85,.035)}
+.result-title strong{font-size:16px;font-weight:750;color:#162a44}
+.result-title small{font-size:12px;color:#798aa0}
+.result-title-side{background:#f4f7fb;color:#647992;font-size:12px}
+.result-glyph{width:37px;height:37px;border-radius:10px;font-size:18px}
+.result-glyph.blue,.result-glyph.lilac,.result-glyph.teal{background:#edf3fb;color:#2467b3}
+.balance-card{background:#fff}
+.balance-amount{color:#142b49;letter-spacing:-1px;font-size:clamp(30px,4vw,40px);margin:20px 0 6px}
+.balance-hint,.soft-note{font-size:12px;line-height:1.7;color:#8091a7}
+.result-line{padding:14px 0;gap:14px}
+.result-line strong,.result-line b{font-size:14px}
+.result-line small{font-size:12px;color:#7f90a5}
+.money-in{color:#148458!important}.money-out{color:#1d3350!important}
+.transfer-amount{text-align:left;font-size:clamp(30px,4vw,40px);color:#142b49;margin:20px 0 17px}
+.detail-grid{gap:0;border-top:1px solid #e8edf3;margin-bottom:10px}
+.detail-grid>div{background:transparent;border-bottom:1px solid #e8edf3;border-radius:0;padding:13px 2px;display:grid;grid-template-columns:minmax(90px,32%) 1fr;align-items:center;gap:10px}
+.detail-grid .transfer-remark{grid-column:1/-1}
+.detail-grid span{font-size:13px;color:#76869b}
+.detail-grid strong{font-size:14px;font-weight:650;color:#182d47}
+.risk-pill{font-size:12px;border-radius:7px;padding:7px 11px}
+.risk-yellow{background:#fff3df;color:#96600b}.risk-red{background:#fcebed;color:#b52c38}
+.approval-card{border:1px solid #ebdcbd;background:#fff9eb;border-radius:12px;padding:18px 21px;box-shadow:none}
+.approval-heading strong{font-size:14px;color:#805612}
+.approval-heading p{font-size:13px;color:#8c6f40}
+.approval-mark{background:#fae6b9;color:#8d6116}
+.approval-card.approval-red{border-color:#efcfd1;background:#fff2f2}
+.approval-red .approval-mark{background:#fce2e4;color:#a82937}
+.approval-red .approval-heading strong{color:#a32c38}
+.approval-red .approval-heading p{color:#9b5b63}
+.approval-card.approval-schedule{background:#fafbfc;border-color:#e2e8f0}
+.approval-schedule .approval-heading strong{color:#263e59}
+.approval-schedule .approval-heading p{color:#65788f}
+.approval-schedule .approval-mark{background:#e8eef7;color:#38648f}
+.approval-check{font-size:13px;color:#47576b}
+.approval-actions button{font-size:13px;padding:11px 20px}
+.approval-primary{background:#1464d2;border-color:#1464d2;box-shadow:none}
+.approval-primary:hover:not(:disabled){background:#0e57bd}
+.otp-area{border-color:#e7dadd;border-radius:10px;margin-top:14px}
+.otp-head strong{font-size:13px}.otp-head small{font-size:12px}
+.otp-request,.technical-details summary{font-size:12px}
+.technical-details{font-size:12px}.result-detail-note{background:#f5f7fa;font-size:13px}
+@media(max-width:550px){.result-card{padding:17px}.detail-grid>div{grid-template-columns:1fr;gap:4px}.transfer-amount{font-size:29px}.approval-card{padding:16px}}
 </style>

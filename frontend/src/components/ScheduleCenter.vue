@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
 
-const props = defineProps({ fetcher: { type: Function, required: true }, userId: { type: Number, required: true } })
+const props = defineProps({ fetcher: { type: Function, required: true }, userId: { type: Number, required: true }, embedded: { type: Boolean, default: false } })
 const open = ref(false)
 const list = ref([])
 const busy = ref(false)
@@ -46,17 +46,17 @@ defineExpose({ refresh })
 </script>
 
 <template>
-  <section class="schedule-center" aria-label="定时转账中心">
-    <div class="schedule-top">
+  <section class="schedule-center" :class="{ 'embedded-center': embedded }" aria-label="定时转账中心">
+    <div v-if="!embedded" class="schedule-top">
       <div class="schedule-heading"><span class="schedule-icon">◷</span><div><strong>定时转账</strong><small>已授权预约由银行到期执行，查看进度或取消尚未执行的计划</small></div></div>
       <button type="button" class="schedule-toggle" @click="toggle">{{ open ? '收起' : '查看预约' }}</button>
     </div>
-    <div v-if="open" class="schedule-body">
+    <div v-if="embedded || open" class="schedule-body">
       <p v-if="error" class="schedule-error" role="alert">{{ error }}</p>
       <button type="button" class="schedule-refresh" :disabled="busy" @click="refresh">{{ busy ? '查询中…' : '刷新银行状态' }}</button>
       <p v-if="!list.length" class="schedule-empty">暂无预约转账。可以在聊天框输入：“明天下午3点给李四转200元”。</p>
       <article v-for="item in list" :key="item.scheduleId" class="schedule-item">
-        <div class="schedule-item-top"><strong>{{ item.payeeName }} · {{ money(item.amount) }}</strong><span class="schedule-state">{{ state[item.status] || item.status }}</span></div>
+        <div class="schedule-item-top"><strong>{{ item.payeeName }} · {{ money(item.amount) }}</strong><span class="schedule-state" :class="`schedule-state-${String(item.status || 'unknown').toLowerCase()}`">{{ state[item.status] || item.status }}</span></div>
         <p>预约时间：{{ item.executeAt?.replace('T', ' ') }}</p>
         <p>收款账户：{{ item.accountMasked }}<span v-if="item.remark"> · {{ item.remark }}</span></p>
         <p v-if="item.failureReason" class="schedule-error">{{ item.failureReason }}</p>
@@ -70,4 +70,23 @@ defineExpose({ refresh })
 <style scoped>
 .schedule-center{margin:10px 0 18px;background:linear-gradient(135deg,#fff,#f6faff);border:1px solid #e0eaf6;border-radius:16px;box-shadow:0 6px 22px rgba(26,65,115,.04);overflow:hidden}
 .schedule-top{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 20px}.schedule-heading{display:flex;align-items:center;gap:12px}.schedule-heading>div{display:grid;gap:4px}.schedule-heading strong{color:#203c61;font-size:15px}.schedule-heading small{font-size:11px;color:#8296ad;line-height:1.6}.schedule-icon{display:grid;place-items:center;background:#e9f2ff;color:#307bd8;width:38px;height:38px;border-radius:12px;font-size:23px}.schedule-toggle,.schedule-refresh,.schedule-cancel{background:white;border:1px solid #d7e4f5;color:#2369ac;border-radius:9px;padding:9px 14px;font-weight:650;font-size:12px;cursor:pointer}.schedule-body{padding:0 20px 19px}.schedule-refresh{margin:0 0 12px}.schedule-item{background:white;border:1px solid #e4ecf6;border-radius:12px;padding:14px 16px;margin:9px 0}.schedule-item-top{display:flex;align-items:center;justify-content:space-between;gap:10px}.schedule-item-top strong{color:#153d65;font-size:13px}.schedule-state{font-size:11px;color:#3476b6;background:#edf5ff;border-radius:8px;padding:5px 9px}.schedule-item p{font-size:12px;color:#72859b;margin:8px 0 0;overflow-wrap:anywhere}.schedule-item .schedule-error,.schedule-error{color:#b64b41;font-size:12px}.schedule-cancel{margin-top:12px;color:#a94a45;border-color:#e5cac8}.schedule-empty{color:#8598aa;font-size:12px;line-height:1.7}.schedule-toggle:disabled,.schedule-cancel:disabled{opacity:.5;cursor:not-allowed}@media(max-width:640px){.schedule-top{padding:14px}.schedule-heading small{font-size:10px}.schedule-body{padding:0 14px 14px}}
+
+.schedule-center.embedded-center{margin:0;background:transparent;box-shadow:none;border:0;border-radius:0}
+.embedded-center .schedule-body{padding:0 2px 22px}
+.embedded-center .schedule-refresh{font-size:13px;background:#fff;border-color:#d6e0ea;margin:0 0 14px}
+.embedded-center .schedule-item{border:1px solid #e2e8f0;border-radius:11px;box-shadow:none;padding:17px;margin:0 0 12px}
+.embedded-center .schedule-item-top strong{font-size:16px;color:#1b344e}
+.embedded-center .schedule-state{background:#eff4fa;font-size:12px;color:#415a75}
+.embedded-center .schedule-item p{font-size:13px;line-height:1.65}
+.embedded-center .schedule-cancel{font-size:13px}
+.embedded-center .schedule-empty{font-size:13px}
+
+/* Status conveys the bank-provided schedule state, never a predicted result. */
+.embedded-center .schedule-state-success{color:#147a56;background:#e8f6ee}
+.embedded-center .schedule-state-failed,.embedded-center .schedule-state-unknown{color:#aa3440;background:#fff0f1}
+.embedded-center .schedule-state-missed{color:#9b671c;background:#fff3dd}
+.embedded-center .schedule-state-cancelled{color:#66798e;background:#eef1f5}
+.embedded-center .schedule-state-processing,.embedded-center .schedule-state-pending_auth{color:#91651c;background:#fff4e2}
+.embedded-center .schedule-state-scheduled{color:#2869ad;background:#eaf3fd}
+.embedded-center .schedule-item{padding:19px 20px}
 </style>

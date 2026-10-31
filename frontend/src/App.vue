@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import DynamicWorkflowCard from './components/DynamicWorkflowCard.vue'
 import AuthPanel from './components/AuthPanel.vue'
 import AaCenter from './components/AaCenter.vue'
@@ -43,6 +43,32 @@ const pending = computed(() => messages.value.some(needsAttention))
 const pendingItem = computed(() => messages.value.find(needsAttention))
 const hasConversation = computed(() => messages.value.some(m => m.role === 'user'))
 const settingsOpen = ref(false)
+const taskCenterOpen = ref(false)
+const taskCenterTab = ref('aa')
+const taskCloseButton = ref(null)
+const taskTrigger = ref(null)
+function showTaskCenter(tab = 'aa') {
+  settingsOpen.value = false
+  taskCenterTab.value = tab
+  taskCenterOpen.value = true
+  nextTick(() => {
+    taskCloseButton.value?.focus()
+    if (tab === 'aa') aaCenter.value?.refresh()
+    else scheduleCenter.value?.refresh()
+  })
+}
+function closeTaskCenter() {
+  if (!taskCenterOpen.value) return
+  taskCenterOpen.value = false
+  nextTick(() => taskTrigger.value?.focus())
+}
+function switchTaskTab(tab) {
+  taskCenterTab.value = tab
+  if (tab === 'aa') aaCenter.value?.refresh()
+  else scheduleCenter.value?.refresh()
+}
+function onGlobalKeydown(event) { if (event.key === 'Escape') closeTaskCenter() }
+
 const isAuthenticated = computed(() => Boolean(token.value.trim() && currentUser.value?.userId))
 
 function headers(overrideToken = undefined) {
@@ -144,6 +170,8 @@ function resetSession(message = '') {
   }]
   workingThread.value = null
   settingsOpen.value = false
+  taskCenterOpen.value = false
+  taskCenterTab.value = 'aa'
   authMode.value = 'login'
   authNotice.value = message
   // Clearing the browser UI does not modify any Java bank order.
@@ -410,35 +438,17 @@ function restartVerifiedLocalChat() {
   // Do not alter bank data or the Python checkpoint.
 }
 
-onMounted(checkHealth)
+onMounted(() => { checkHealth(); window.addEventListener('keydown', onGlobalKeydown) })
+onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown))
 </script>
 
 <template>
-  <div class="layout bp-shell">
-    <aside class="side bp-sidebar" aria-label="应用导航">
-      <div class="brand-lockup">
-        <span class="brand-mark" aria-hidden="true">B</span>
-        <div class="brand-copy"><strong>BankPilot</strong><small>AI BANKING ASSISTANT</small></div>
-      </div>
-
-      <div class="sidebar-group">
-        <span class="sidebar-caption">工作空间</span>
-        <div class="sidebar-active"><span class="sidebar-nav-icon" aria-hidden="true">✦</span> 智能对话 <span class="sidebar-active-dot"></span></div>
-      </div>
-
-      <div class="sidebar-spacer"></div>
-      <div class="sidebar-capability">
-        <span class="sidebar-capability-label">你的智能银行助手</span>
-        <p>账户查询、收支分析、模拟转账与代扣管理，都可以用一句话完成。</p>
-      </div>
-      <div class="sidebar-bottom"><span class="small-led"></span> BANKPILOT DEMO <span class="sidebar-version">DAY 07</span></div>
-    </aside>
-
+  <div class="layout bp-shell" :class="{ 'bp-auth-shell': !isAuthenticated }">
     <main class="bp-main">
-      <header class="bp-header">
+      <header v-if="isAuthenticated" class="bp-header">
         <div class="header-heading">
-          <div class="header-title">银行智能助手 <span class="header-divider"></span> <span class="header-subtitle">智慧服务工作台</span></div>
-          <div class="header-caption">你的银行事务，交给 BankPilot 安排</div>
+          <div class="header-brand-row"><span class="brand-leaf" aria-hidden="true">◈</span><strong>BankPilot</strong><span class="header-brand-divider"></span><span>银行智能助手 / 智慧服务工作台</span></div>
+          <div class="header-caption">银行数据与任务状态以服务端核验结果为准</div>
         </div>
         <div class="header-actions">
           <span class="service-state" :class="connected ? 'online' : 'offline'"><span class="status-led"></span>{{ connected ? '服务已连接' : '连接未就绪' }}</span>
@@ -447,8 +457,14 @@ onMounted(checkHealth)
             <span class="settings-symbol" aria-hidden="true">⚙</span> 连接设置
             <span class="settings-caret" aria-hidden="true">⌄</span>
           </button>
+          <button v-if="isAuthenticated" ref="taskTrigger" type="button" class="task-center-trigger" :aria-expanded="taskCenterOpen" aria-controls="bank-task-center" @click="showTaskCenter()"><span aria-hidden="true">▣</span> 任务中心</button>
           <button v-if="isAuthenticated" type="button" class="logout-trigger" :disabled="busy" @click="logoutUser">退出登录</button>
         </div>
+      </header>
+
+      <header v-else class="auth-site-header">
+        <div class="auth-site-brand"><svg class="auth-brand-symbol" viewBox="0 0 48 48" aria-hidden="true" focusable="false"><defs><linearGradient id="auth-logo-gradient" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#36a1ff"/><stop offset="1" stop-color="#0861de"/></linearGradient></defs><path d="M7 28C15 27 24 15 41 8C40 23 31 34 19 35C16 40 12 42 7 42C10 34 16 28 27 22C18 25 12 29 7 35Z" fill="url(#auth-logo-gradient)"/><path d="M10 38C18 31 26 26 37 20" stroke="#fff" stroke-width="2.2" opacity=".83" stroke-linecap="round"/></svg><strong>BankPilot</strong><span class="auth-site-divider"></span><span class="auth-site-name">银行智能助手 / 智慧服务工作台</span></div>
+        <span class="auth-site-status"><span class="status-led" :class="{ unavailable: !connected }"></span>{{ connected ? '服务已连接' : '连接未就绪' }}</span>
       </header>
 
       <section v-if="isAuthenticated && settingsOpen" id="bank-settings" class="connection-drawer" aria-label="银行连接设置">
@@ -464,8 +480,6 @@ onMounted(checkHealth)
       </section>
       <section v-else class="bp-content">
         <p v-if="authNotice" class="session-notice" role="alert">{{ authNotice }}</p>
-        <AaCenter :key="currentUser.userId" ref="aaCenter" :user-id="currentUser.userId" :fetcher="req" />
-        <ScheduleCenter :key="currentUser.userId" ref="scheduleCenter" :user-id="currentUser.userId" :fetcher="req" />
         <div v-if="!hasConversation" class="welcome-screen">
           <div class="welcome-kicker"><span class="welcome-kicker-dot"></span> BANKPILOT · AI ASSISTANT</div>
           <h1>你好，今天想办理什么？</h1>
@@ -481,10 +495,7 @@ onMounted(checkHealth)
           <button class="sample-combo" type="button" :disabled="busy || pending" @click="fillExample(examples[examples.length - 1])">试试多项业务组合 <span aria-hidden="true">↗</span></button>
         </div>
 
-        <div v-else class="conversation-heading">
-          <span class="conversation-overline">CONVERSATION</span><h2>与 BankPilot 的对话</h2>
-          <p>查询自动完成，涉及账户变更的操作将单独请你确认。</p>
-        </div>
+
 
         <div v-if="pending" class="pending-banner" role="status">
           <span class="pending-icon" aria-hidden="true">!</span>
@@ -505,7 +516,7 @@ onMounted(checkHealth)
             <div class="avatar bp-avatar" :class="m.role === 'assistant' ? 'bp-avatar-agent' : 'bp-avatar-user'" aria-hidden="true">{{ m.role === 'assistant' ? 'B' : '我' }}</div>
             <div class="msg-content bp-message-content">
               <div v-if="m.role === 'assistant'" class="message-sender">BankPilot <span>智能助手</span></div>
-              <div class="bubble bp-bubble">{{ m.reply }}</div>
+              <div v-if="m.role === 'user' || m.reply" class="bubble bp-bubble">{{ m.reply }}</div>
               <DynamicWorkflowCard
                   v-if="m.intent === 'dynamic' && m.data"
                   :task="m.data"
@@ -527,6 +538,25 @@ onMounted(checkHealth)
           <div ref="lastRef" class="scroll-anchor"></div>
         </section>
       </section>
+
+      <template v-if="isAuthenticated">
+        <div v-if="taskCenterOpen" class="task-center-mask" aria-hidden="true" @click="closeTaskCenter"></div>
+        <aside id="bank-task-center" class="task-center-drawer" :class="{ 'is-open': taskCenterOpen }" :inert="!taskCenterOpen" role="dialog" aria-modal="true" aria-labelledby="task-center-title" :aria-hidden="!taskCenterOpen">
+          <div class="task-center-header">
+            <div><h2 id="task-center-title">任务中心</h2><p>查看 AA 收付款和单次定时转账</p></div>
+            <button ref="taskCloseButton" type="button" class="task-center-close" aria-label="关闭任务中心" @click="closeTaskCenter">×</button>
+          </div>
+          <div class="task-center-tabs" role="tablist" aria-label="任务类型">
+            <button type="button" role="tab" :aria-selected="taskCenterTab === 'aa'" :class="{ active: taskCenterTab === 'aa' }" @click="switchTaskTab('aa')">AA 收付款</button>
+            <button type="button" role="tab" :aria-selected="taskCenterTab === 'schedule'" :class="{ active: taskCenterTab === 'schedule' }" @click="switchTaskTab('schedule')">定时转账</button>
+          </div>
+          <div class="task-center-scroll">
+            <div v-show="taskCenterTab === 'aa'" role="tabpanel"><AaCenter :key="currentUser.userId" ref="aaCenter" embedded :user-id="currentUser.userId" :fetcher="req" /></div>
+            <div v-show="taskCenterTab === 'schedule'" role="tabpanel"><ScheduleCenter :key="currentUser.userId" ref="scheduleCenter" embedded :user-id="currentUser.userId" :fetcher="req" /></div>
+          </div>
+          <p class="task-center-footnote">所有资金操作仍须通过原银行审批及验证流程。</p>
+        </aside>
+      </template>
 
       <footer v-if="isAuthenticated" class="bp-composer">
         <div class="composer-inner">
