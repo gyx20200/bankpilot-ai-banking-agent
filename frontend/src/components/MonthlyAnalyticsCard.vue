@@ -67,10 +67,10 @@ const percentText = value => `${value.toFixed(1)}%`
   <section class="panel monthly-card" aria-label="月度收支分析">
     <div class="monthly-heading">
       <div>
-        <div class="monthly-eyebrow">MONTHLY CASH FLOW</div>
+        <div class="monthly-eyebrow">账户账单 / MONTHLY STATEMENT</div>
         <h4>月度收支分析 · {{ monthLabel }}</h4>
       </div>
-      <span class="monthly-source">{{ data?.source === 'mysql' ? 'MySQL 统计' : '银行接口数据' }}</span>
+      <span class="monthly-source">{{ data?.source === 'mysql' ? '银行统计' : '银行接口数据' }}</span>
     </div>
 
     <div v-if="!valid" class="monthly-empty" role="alert">
@@ -79,15 +79,15 @@ const percentText = value => `${value.toFixed(1)}%`
     <template v-else>
       <div class="monthly-summary">
         <div class="monthly-metric">
-          <span class="monthly-metric-label">当月总收入</span>
+          <span class="monthly-metric-label">本月收入</span>
           <strong class="monthly-positive">{{ money(data.totalIncome) }}</strong>
         </div>
         <div class="monthly-metric">
-          <span class="monthly-metric-label">当月总支出</span>
+          <span class="monthly-metric-label">本月支出</span>
           <strong class="monthly-expense">{{ money(data.totalExpense) }}</strong>
         </div>
         <div class="monthly-metric monthly-net">
-          <span class="monthly-metric-label">净现金流（收入－支出）</span>
+          <span class="monthly-metric-label">净现金流</span>
           <strong :class="netCashFlow >= 0 ? 'monthly-positive' : 'monthly-negative'">
             {{ netCashFlow > 0 ? '+' : '' }}{{ money(data.netCashFlow) }}
           </strong>
@@ -95,7 +95,7 @@ const percentText = value => `${value.toFixed(1)}%`
       </div>
 
       <div class="monthly-section-title">
-        <strong>支出构成</strong>
+        <strong>支出分类</strong>
         <span>按银行流水类别汇总</span>
       </div>
 
@@ -103,7 +103,7 @@ const percentText = value => `${value.toFixed(1)}%`
         <div v-for="category in categories" :key="category.key" class="monthly-category">
           <div class="monthly-category-top">
             <span class="monthly-category-name">{{ category.name }}</span>
-            <span class="monthly-category-value">{{ money(category.amount) }} · {{ percentText(category.percentage) }}</span>
+            <span class="monthly-category-value">{{ money(category.amount) }}</span>
           </div>
           <div
             class="monthly-track"
@@ -115,7 +115,7 @@ const percentText = value => `${value.toFixed(1)}%`
           >
             <div class="monthly-bar" :style="{ width: `${category.percentage}%` }"></div>
           </div>
-          <div v-if="category.count !== null" class="monthly-count">{{ category.count }} 笔</div>
+          <div class="monthly-count">{{ category.count !== null ? `${category.count} 笔` : '—' }} · {{ percentText(category.percentage) }}</div>
         </div>
       </div>
       <p v-else class="monthly-empty">该月暂无可展示的支出分类。</p>
@@ -156,4 +156,24 @@ const percentText = value => `${value.toFixed(1)}%`
 .monthly-empty { color: #72869a; background: #f5f8fc; padding: 12px; border-radius: 9px; font-size: 12px; margin-top: 12px; }
 .monthly-footnote { border-top: 1px solid #e9eef4; margin-top: 18px; padding-top: 12px; display: grid; gap: 5px; color: #8495a7; font-size: 10px; line-height: 1.6; }
 @media (max-width: 520px) { .monthly-card { width: 100%; } .monthly-heading { flex-wrap: wrap; } .monthly-summary { gap: 7px; } .monthly-metric { padding: 10px; } }
+
+/* Real bank-statement presentation, no calculated month-on-month or invented advice. */
+.monthly-card{width:min(810px,100%);border:1px solid #dfe7f0;border-radius:14px;padding:23px 25px;box-shadow:0 7px 25px rgba(26,54,85,.035)}
+.monthly-heading h4{font-size:20px;color:#172b44;line-height:1.4;margin-top:7px}
+.monthly-eyebrow{font-size:11px;color:#768aa1;letter-spacing:1.2px}
+.monthly-source{border:1px solid #e2e8f0;background:#fff;font-size:11px;color:#6c7d90}
+.monthly-summary{grid-template-columns:repeat(3,minmax(0,1fr));gap:0;margin:24px 0;border-top:1px solid #e9eef4;border-bottom:1px solid #e9eef4;padding:23px 0}
+.monthly-metric,.monthly-net{grid-column:auto;background:none;border-radius:0;padding:0 12px 0 0}
+.monthly-metric + .monthly-metric{border-left:1px solid #e3e9f0;padding-left:20px}
+.monthly-metric-label{font-size:13px;margin-bottom:9px}
+.monthly-metric strong,.monthly-net strong{font-size:clamp(17px,2.5vw,25px);font-weight:760;letter-spacing:-.5px}
+.monthly-positive{color:#182f4c}.monthly-net .monthly-positive{color:#1963b4}.monthly-negative{color:#ba343d}
+.monthly-expense{color:#182f4c}
+.monthly-section-title{margin-bottom:12px}.monthly-section-title strong{font-size:15px;color:#1c324e}.monthly-section-title span{font-size:12px}
+.monthly-categories{gap:0}.monthly-category{display:grid;grid-template-columns:minmax(75px,.8fr) minmax(100px,2.2fr) minmax(75px,.65fr) minmax(90px,1fr);align-items:center;gap:12px;padding:13px 0;border-bottom:1px solid #edf1f5}
+.monthly-category-top{display:contents}.monthly-category-name{grid-column:1;grid-row:1;font-size:14px;color:#273d56}.monthly-category-value{grid-column:4;grid-row:1;text-align:right;font-size:14px;font-weight:670;color:#22364e}
+.monthly-track{grid-column:2;grid-row:1;margin:0;height:6px;background:#ecf0f5;border-radius:8px}.monthly-bar{background:#3978b9}
+.monthly-count{grid-column:3;grid-row:1;font-size:12px;margin:0;color:#788b9e;white-space:nowrap;text-align:right}
+.monthly-footnote{margin-top:16px;padding-top:14px;font-size:11px;color:#7d8ca0}
+@media(max-width:620px){.monthly-card{padding:18px}.monthly-summary{grid-template-columns:1fr;gap:13px;padding:16px 0}.monthly-metric + .monthly-metric{border-left:0;border-top:1px solid #edf1f5;padding:12px 0 0}.monthly-metric{padding:0}.monthly-category{grid-template-columns:70px minmax(40px,1fr) 62px;gap:8px}.monthly-category-top{display:contents}.monthly-category-value{grid-column:3}.monthly-track{grid-column:2}.monthly-count{grid-column:2;text-align:left;grid-row:2}.monthly-category{row-gap:6px}.monthly-category-name{grid-column:1;grid-row:1}.monthly-track{grid-row:1}.monthly-category-value{grid-row:1}}
 </style>

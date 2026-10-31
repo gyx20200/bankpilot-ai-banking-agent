@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
 
-const props = defineProps({ fetcher: { type: Function, required: true }, userId: { type: Number, required: true } })
+const props = defineProps({ fetcher: { type: Function, required: true }, userId: { type: Number, required: true }, embedded: { type: Boolean, default: false } })
 const open = ref(false)
 const incoming = ref([])
 const outgoing = ref([])
@@ -14,6 +14,7 @@ const uid = () => crypto.randomUUID()
 const state = id => action.value[id] || null
 function mark(id, change) { action.value = { ...action.value, [id]: { ...(action.value[id] || {}), ...change } } }
 const states = { PENDING: '待付款', PAYING: '银行审批中', PAID: '已支付', DECLINED: '已拒绝', FAILED: '付款失败' }
+const collectionStates = { DRAFT: '待发布', OPEN: '收款中', PARTIAL: '部分已收', COMPLETED: '已收齐', CANCELLED: '已取消', CLOSED: '已关闭' }
 
 async function refresh() {
   if (busy.value) return
@@ -106,25 +107,25 @@ defineExpose({ refresh })
 </script>
 
 <template>
-  <section class="aa-center" aria-label="AA 收付款中心">
-    <div class="aa-top">
+  <section class="aa-center" :class="{ 'embedded-center': embedded }" aria-label="AA 收付款中心">
+    <div v-if="!embedded" class="aa-top">
       <div class="aa-head"><span class="aa-icon">◎</span><div><strong>AA 收付款</strong><small>查看别人向你发起的请求，以及你的收款进度</small></div></div>
       <div class="aa-tools"><span class="aa-count">{{ incoming.filter(x => x.status === 'PENDING' || x.status === 'PAYING').length }} 项待处理</span><button type="button" @click="toggle">{{ open ? '收起' : '查看请求' }}</button></div>
     </div>
-    <div v-if="open" class="aa-body">
+    <div v-if="embedded || open" class="aa-body">
       <div v-if="error" class="aa-error" role="alert">{{ error }}</div>
       <button class="aa-refresh" type="button" :disabled="busy" @click="refresh">{{ busy ? '处理中…' : '刷新银行状态' }}</button>
       <h3>发给我的付款请求</h3>
       <p v-if="!incoming.length" class="aa-empty">暂无 AA 付款请求。</p>
       <article v-for="item in incoming" :key="item.itemId" class="aa-entry">
-        <div class="aa-entry-top"><div><strong>{{ item.initiatorName }} 发起的收款</strong><small>{{ item.reason || 'AA 费用' }}</small></div><span class="aa-state">{{ states[item.status] || item.status }}</span></div>
+        <div class="aa-entry-top"><div><strong>{{ item.initiatorName }} 发起的收款</strong><small>{{ item.reason || 'AA 费用' }}</small></div><span class="aa-state" :class="`aa-state-${String(item.status || 'unknown').toLowerCase()}`">{{ states[item.status] || item.status }}</span></div>
         <div class="aa-amount">{{ money(item.amount) }}</div>
         <template v-if="item.status === 'PENDING' && !state(item.itemId)?.order">
           <div class="aa-actions"><button type="button" :disabled="busy || state(item.itemId)?.uncertain" @click="prepare(item)">查看并准备付款</button><button class="outline" type="button" :disabled="busy || state(item.itemId)?.uncertain" @click="decline(item)">拒绝</button></div>
         </template>
         <template v-if="item.status === 'PAYING' || state(item.itemId)?.order">
           <div v-if="state(item.itemId)?.order" class="aa-approval">
-            <p>付款对象：{{ item.initiatorName }} · 银行风控：<strong>{{ state(item.itemId).order.riskLevel }}</strong></p>
+            <p>付款对象：{{ item.initiatorName }} · 风险等级：<strong class="aa-risk-badge" :class="state(item.itemId).order.riskLevel === 'RED' ? 'aa-risk-red' : state(item.itemId).order.riskLevel === 'YELLOW' ? 'aa-risk-yellow' : 'aa-risk-neutral'">{{ state(item.itemId).order.riskLevel === 'RED' ? '红色 · 需 OTP' : (state(item.itemId).order.riskLevel === 'YELLOW' ? '黄色 · 需确认' : (state(item.itemId).order.riskLevel || '待核查')) }}</strong></p>
             <button v-if="state(item.itemId).order.riskLevel === 'RED'" class="outline" type="button" :disabled="busy || state(item.itemId)?.uncertain" @click="requestOtp(item)">向银行申请 OTP</button>
             <input v-if="state(item.itemId).order.riskLevel === 'RED'" :value="state(item.itemId).otp || ''" inputmode="numeric" maxlength="6" placeholder="输入六位 OTP" aria-label="AA 付款验证码" @input="mark(item.itemId,{otp:$event.target.value})" />
             <label class="aa-check"><input type="checkbox" :checked="!!state(item.itemId).confirmed" @change="mark(item.itemId,{confirmed:$event.target.checked})" />我确认由本人账户向 {{ item.initiatorName }} 支付 {{ money(item.amount) }}</label>
@@ -137,7 +138,7 @@ defineExpose({ refresh })
       <h3>我发起的收款</h3>
       <p v-if="!outgoing.length" class="aa-empty">暂无已发布的 AA 收款单。</p>
       <article v-for="record in outgoing" :key="record.collectionId" class="aa-entry">
-        <div class="aa-entry-top"><div><strong>{{ record.reason || 'AA 收款' }}</strong><small>银行收款单：{{ record.collectionId }}</small></div><span class="aa-state">{{ record.status }}</span></div>
+        <div class="aa-entry-top"><div><strong>{{ record.reason || 'AA 收款' }}</strong><small>银行收款单：{{ record.collectionId }}</small></div><span class="aa-state" :class="`aa-state-${String(record.status || 'unknown').toLowerCase()}`">{{ collectionStates[record.status] || record.status }}</span></div>
         <p class="aa-total">实际已收 <strong>{{ money(record.receivedAmount) }}</strong> / {{ money(record.requestedAmount) }}</p>
         <div v-for="person in record.items" :key="person.itemId" class="aa-person"><span>{{ person.payerName }} · {{ money(person.amount) }}</span><span>{{ states[person.status] || person.status }}</span></div>
       </article>
@@ -148,4 +149,35 @@ defineExpose({ refresh })
 <style scoped>
 .aa-center{margin:8px 0 24px;border:1px solid #dce7f5;border-radius:18px;background:linear-gradient(130deg,#fff,#f4f9ff);box-shadow:0 8px 22px #10294909;max-width:760px}
 .aa-top,.aa-entry-top{display:flex;justify-content:space-between;align-items:center;gap:16px}.aa-top{padding:17px 20px}.aa-head{display:flex;align-items:center;gap:12px}.aa-icon{width:39px;height:39px;display:grid;place-items:center;border-radius:12px;background:#e6f1ff;color:#2275da;font-size:25px}.aa-head>div,.aa-entry-top>div{display:grid;gap:4px}.aa-head strong{font-size:14px;color:#1a3454}.aa-head small,.aa-entry-top small{font-size:11px;color:#899ab0}.aa-tools{display:flex;align-items:center;gap:10px}.aa-count,.aa-state{font-size:11px;background:#eaf2ff;color:#366da7;border-radius:9px;padding:6px 8px;white-space:nowrap}.aa-tools button,.aa-actions button,.aa-approval>button,.aa-refresh{border:0;border-radius:9px;background:#2378da;color:#fff;font-size:12px;font-weight:700;padding:10px 13px;cursor:pointer}.aa-body{border-top:1px solid #e9eff7;padding:15px 20px 20px;display:grid;gap:12px}.aa-body h3{font-size:13px;color:#1b3557;margin:14px 0 2px}.aa-refresh{justify-self:start;background:#e9f1fb;color:#376997}.aa-entry{border:1px solid #e4ebf5;border-radius:13px;background:#fff;padding:16px;display:grid;gap:11px}.aa-entry-top strong{font-size:13px;color:#243d59}.aa-amount{font-size:24px;color:#1f69c3;font-weight:800}.aa-actions{display:flex;gap:9px;flex-wrap:wrap}.aa-actions .outline,.aa-approval button.outline{background:#f1f6fd;color:#386d9f}.aa-approval{padding:12px;border-radius:10px;background:#f7faff;display:grid;gap:10px;font-size:12px;color:#4d6787}.aa-approval p{margin:0}.aa-approval input:not([type=checkbox]){border:1px solid #cfddec;border-radius:8px;padding:9px;max-width:220px}.aa-check{display:flex;gap:9px;align-items:flex-start;line-height:1.5}.aa-check input{margin-top:3px}.aa-total{font-size:12px;color:#71859d;margin:0}.aa-total strong{font-size:19px;color:#2073c8}.aa-person{display:flex;justify-content:space-between;gap:12px;font-size:12px;border-top:1px solid #eef2f8;padding-top:9px}.aa-error{background:#fff1f1;color:#b73535;padding:12px;border-radius:10px;font-size:12px}.aa-empty,.aa-order{font-size:11px;color:#8294aa;margin:0;overflow-wrap:anywhere}.aa-body button:disabled{cursor:not-allowed;opacity:.45}@media(max-width:650px){.aa-top{align-items:flex-start;flex-direction:column}.aa-body{padding:12px}.aa-center{margin:8px 0 18px}}
+
+.aa-risk-badge{font-size:12px;padding:4px 7px;border-radius:6px;font-weight:700}
+.aa-risk-yellow{color:#926115;background:#fff3dd}
+.aa-risk-red{color:#ad303e;background:#fff0f0}
+/* Drawer presentation: the business handlers and bank calls above are unchanged. */
+.aa-center.embedded-center{margin:0;max-width:none;border:0;border-radius:0;box-shadow:none;background:transparent}
+.embedded-center .aa-body{border:0;padding:0 2px 22px;gap:13px}
+.embedded-center .aa-body h3{font-size:15px;margin:19px 0 5px;color:#1d314b}
+.embedded-center .aa-entry{border-radius:11px;border-color:#e2e8f0;padding:16px;gap:12px;box-shadow:none}
+.embedded-center .aa-entry-top strong{font-size:14px}
+.embedded-center .aa-entry-top small{font-size:12px}
+.embedded-center .aa-amount{font-size:27px;color:#142e4b}
+.embedded-center .aa-total{font-size:13px}
+.embedded-center .aa-total strong{font-size:21px;color:#173d64}
+.embedded-center .aa-person{font-size:13px}
+.embedded-center .aa-state{background:#f1f5f9;color:#445c75;font-size:12px}
+.embedded-center .aa-refresh{font-size:13px;background:transparent;border:1px solid #d3dfeb;padding:9px 13px}
+.embedded-center .aa-actions button{font-size:13px;padding:10px 16px}
+.embedded-center .aa-approval{background:#fafbfc;border:1px solid #e6ebf0;color:#344c65;font-size:13px}
+.embedded-center .aa-empty{font-size:13px;line-height:1.6}
+
+/* Visual-only state differentiation, without inferring banking status. */
+.aa-risk-neutral{color:#65758b;background:#f0f3f7}
+.embedded-center .aa-state-paid,.embedded-center .aa-state-completed{background:#e7f6ee;color:#197e58}
+.embedded-center .aa-state-pending,.embedded-center .aa-state-paying,.embedded-center .aa-state-partial{background:#fff4df;color:#94621d}
+.embedded-center .aa-state-failed,.embedded-center .aa-state-declined{background:#fff0f1;color:#ac3c45}
+.embedded-center .aa-entry{padding:19px 20px}
+.embedded-center .aa-actions{justify-content:flex-end}
+.embedded-center .aa-entry-top{align-items:flex-start}
+.embedded-center .aa-amount{font-variant-numeric:tabular-nums}
+.embedded-center .aa-order{font-size:11px;line-height:1.5}
 </style>
