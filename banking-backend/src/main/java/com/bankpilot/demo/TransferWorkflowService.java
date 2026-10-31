@@ -380,11 +380,11 @@ public StatusView cancel(long userId, long orderId) {
                 order.senderId()!=((Number)sc.get("sender_account_id")).longValue() ||
                 order.receiverId()!=((Number)sc.get("receiver_account_id")).longValue())
             conflict("Schedule order binding mismatch");
-        var due=((Timestamp)sc.get("scheduled_at_utc")).toLocalDateTime();
+        var due=Day7ScheduledService.dbDateTime(sc.get("scheduled_at_utc"));
         var fingerprint=Day7ScheduledService.scope(userId,order.senderId(),order.receiverId(),
                 order.amount(),due.toInstant(java.time.ZoneOffset.UTC),(String)sc.get("remark"));
         if(!fingerprint.equals(sc.get("scope_hash")) || !fingerprint.equals(sc.get("auth_scope")) ||
-                (sc.get("valid_until")!=null && ((Timestamp)sc.get("valid_until")).toLocalDateTime().isBefore(LocalDateTime.now(java.time.ZoneOffset.UTC))) ||
+                (sc.get("valid_until")!=null && Day7ScheduledService.dbDateTime(sc.get("valid_until")).isBefore(LocalDateTime.now(java.time.ZoneOffset.UTC))) ||
                 (!"RED".equals(sc.get("covered_risk")) || !"DEMO_OTP".equals(sc.get("auth_method"))))
             conflict("Schedule preauthorization scope/risk invalid");
         jdbc.update("""

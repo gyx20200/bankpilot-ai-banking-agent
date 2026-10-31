@@ -1,3 +1,4 @@
+USE bankpilot_day7_test;
 CREATE TABLE business_audit_events (
     id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
     actor_user_id BIGINT NULL,

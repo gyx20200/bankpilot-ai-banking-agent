@@ -1,3 +1,4 @@
+USE bankpilot_day7_test;
 -- LOCAL DAY7 TEST DATABASE ONLY. Run as MySQL admin after restoring backup and migration.
 -- Assumes bankpilot_app@localhost exists and has its own strong local password.
 GRANT SELECT ON bankpilot_day7_test.* TO 'bankpilot_app'@'localhost';

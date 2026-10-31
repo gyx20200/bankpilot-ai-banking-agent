@@ -1,3 +1,4 @@
+USE bankpilot_day7_test;
 -- Run ONCE against restored Day7 test DB only.
 CREATE TABLE scheduled_transfers (
     id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,

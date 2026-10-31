@@ -21,7 +21,7 @@ public class Day7ScheduledExecutionCoordinator {
         if(rows.isEmpty()) return;
         var s=rows.get(0);
         if(!"SCHEDULED".equals(s.get("status"))) return;
-        var utc=((Timestamp)s.get("scheduled_at_utc")).toLocalDateTime();
+        var utc=Day7ScheduledService.dbDateTime(s.get("scheduled_at_utc"));
         if(utc.isAfter(LocalDateTime.now(ZoneOffset.UTC))) return;
         if(utc.plusSeconds(60).isBefore(LocalDateTime.now(ZoneOffset.UTC))) {
             jdbc.update("UPDATE scheduled_transfers SET status='MISSED',last_error_code='EXECUTION_WINDOW_MISSED',updated_at=NOW(6) WHERE id=?",id);
@@ -35,12 +35,12 @@ public class Day7ScheduledExecutionCoordinator {
         var when=utc.toInstant(ZoneOffset.UTC);
         var hash=Day7ScheduledService.scope(owner,sender,receiver,amount,when,remark);
         var auth=jdbc.queryForList("""
-          SELECT scope_hash,covered_risk,status,valid_until FROM scheduled_transfer_authorizations
+          SELECT scope_hash,covered_risk,status,valid_until,auth_method FROM scheduled_transfer_authorizations
           WHERE schedule_id=? AND user_id=? FOR UPDATE
           """,id,owner);
         if(auth.size()!=1 || !hash.equals(s.get("scope_hash")) || !hash.equals(auth.get(0).get("scope_hash"))
           || !"ACTIVE".equals(auth.get(0).get("status"))
-          || (auth.get(0).get("valid_until")!=null && ((Timestamp)auth.get(0).get("valid_until")).toLocalDateTime().isBefore(LocalDateTime.now(ZoneOffset.UTC)))){
+          || (auth.get(0).get("valid_until")!=null && Day7ScheduledService.dbDateTime(auth.get(0).get("valid_until")).isBefore(LocalDateTime.now(ZoneOffset.UTC)))){
             fail(id,"INVALID_SCHEDULE_PREAUTH");return;
         }
         Integer eligible=jdbc.queryForObject("""

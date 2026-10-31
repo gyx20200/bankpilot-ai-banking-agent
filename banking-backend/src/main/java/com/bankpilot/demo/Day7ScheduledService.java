@@ -88,7 +88,7 @@ public class Day7ScheduledService {
             ps.setLong(1,user);ps.setLong(2,sender.get(0));ps.setLong(3,receiver.get(0));ps.setLong(4,b.payeeId());
             ps.setBigDecimal(5,amount);ps.setString(6,remark);ps.setString(7,b.requestId());
             ps.setString(8,fingerprint);
-            ps.setTimestamp(9,Timestamp.valueOf(LocalDateTime.ofInstant(when,ZoneOffset.UTC)));
+            ps.setObject(9, LocalDateTime.ofInstant(when, ZoneOffset.UTC));
             return ps;
         },key);
         if(key.getKey()==null) throw new IllegalStateException("Schedule ID missing");
@@ -116,7 +116,7 @@ public class Day7ScheduledService {
             INSERT INTO scheduled_otp_challenges(schedule_id,user_id,otp_salt,otp_hash,failed_attempts,expires_at)
             VALUES (?,?,?,?,0,?) ON DUPLICATE KEY UPDATE otp_salt=VALUES(otp_salt),
                 otp_hash=VALUES(otp_hash),expires_at=VALUES(expires_at)
-            """,id,user,saltText,digest,Timestamp.valueOf(utc().plusMinutes(2)));
+            """,id,user,saltText,digest,utc().plusMinutes(2));
         otpVault.store(-id,user,code,Instant.now().plusSeconds(120));
         return Map.of("scheduleId",Long.toString(id),"status","OTP_ISSUED","expiresInSeconds",120);
     }
@@ -138,14 +138,14 @@ public class Day7ScheduledService {
             throw new ResponseStatusException(HttpStatus.CONFLICT,"Schedule cannot be authorized");
         lockUser(user);
         var amount=(BigDecimal)s.get("amount");
-        var due=((Timestamp)s.get("scheduled_at_utc")).toLocalDateTime();
+        var due=dbDateTime(s.get("scheduled_at_utc"));
         if(!due.isAfter(utc()))
             throw new ResponseStatusException(HttpStatus.CONFLICT,"Schedule execution time already passed");
         // All scheduled transfers require their own short-lived DEMO OTP, regardless of amount.
         var codes=jdbc.queryForList("SELECT * FROM scheduled_otp_challenges WHERE schedule_id=? AND user_id=? FOR UPDATE",id,user);
         if(codes.size()!=1)throw new ResponseStatusException(HttpStatus.CONFLICT,"Request schedule OTP first");
         var code=codes.get(0);
-        var expiry=((Timestamp)code.get("expires_at")).toLocalDateTime();
+        var expiry=dbDateTime(code.get("expires_at"));
         if(!expiry.isAfter(utc()) || ((Number)code.get("failed_attempts")).intValue()>=5)
             throw new ResponseStatusException(HttpStatus.CONFLICT,"OTP expired or exhausted");
         String candidate=b.otpCode()==null?"":b.otpCode();
@@ -205,7 +205,7 @@ public class Day7ScheduledService {
             """,id,user);
         if(rows.isEmpty())throw new ResponseStatusException(HttpStatus.NOT_FOUND,"Schedule not found");
         var s=rows.get(0);
-        var due=((Timestamp)s.get("scheduled_at_utc")).toLocalDateTime().toInstant(ZoneOffset.UTC);
+        var due=dbDateTime(s.get("scheduled_at_utc")).toInstant(ZoneOffset.UTC);
         var view=new LinkedHashMap<String,Object>();
         view.put("scheduleId",Long.toString(id));
         view.put("payeeName",s.get("payee_name"));
@@ -227,6 +227,14 @@ public class Day7ScheduledService {
         for(long id:ids)result.add(get(user,id));
         return result;
     }
+    /** JdbcTemplate.queryForList may return LocalDateTime on MySQL and Timestamp on H2/other drivers. */
+    static LocalDateTime dbDateTime(Object value){
+        if(value instanceof LocalDateTime dt) return dt;
+        if(value instanceof Timestamp ts) return ts.toLocalDateTime();
+        throw new IllegalStateException("Unexpected SQL datetime value type: "
+            +(value==null?"null":value.getClass().getName()));
+    }
+
     private static boolean validRequest(String s){return s!=null && s.matches("[A-Za-z0-9_-]{8,64}");}
 
     private static BigDecimal money(String s){

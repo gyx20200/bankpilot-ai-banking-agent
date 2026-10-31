@@ -18,7 +18,10 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 
-@SpringBootTest
+@SpringBootTest(properties = {
+    "bankpilot.demo.otp.debug-enabled=true",
+    "spring.datasource.url=jdbc:h2:mem:bankpilotworkflow;DB_CLOSE_DELAY=-1"
+})
 @AutoConfigureMockMvc
 class TransferWorkflowSecurityTest {
     @Autowired MockMvc mvc;

@@ -1,3 +1,4 @@
+USE bankpilot_day7_test;
 -- BankPilot Day 7: run against a BACKED-UP Day 6 database, with the correct DB selected.
 -- No USE statement: SELECT DATABASE() before running. MySQL 8, local demo only.
 ALTER TABLE users ADD COLUMN phone VARCHAR(20) NULL;

@@ -1,3 +1,4 @@
+USE bankpilot_day7_test;
 -- Execute once in a backed-up Day7 MySQL 8 demo database after day7_01_auth.sql.
 CREATE TABLE aa_collections (
   id BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,

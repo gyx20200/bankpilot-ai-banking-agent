@@ -1,3 +1,4 @@
+USE bankpilot_day7_test;
 -- READ ONLY; choose Day7 test schema first. Never run init.sql to reset funds.
 SELECT DATABASE() AS active_schema;
 SELECT id,display_name,phone,status FROM users ORDER BY id;
