@@ -14,7 +14,7 @@ public class TransferPrepareController {
 
     public record PrepareRequest(Long payeeId, String amount, String requestId, String remark) { }
     public record OrderView(long orderId, String payeeName, String accountMasked,
-                            BigDecimal amount, String riskLevel, String status) { }
+                            BigDecimal amount, String riskLevel, String status, String remark) { }
 
     @PostMapping("/prepare")
     @ResponseStatus(HttpStatus.CREATED)

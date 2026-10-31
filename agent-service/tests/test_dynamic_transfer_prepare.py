@@ -47,8 +47,13 @@ def setup(monkeypatch, tasks, payees=None):
             {'id': 1, 'payeeName': '李四', 'payeeAccountMasked': '****5291'},
             {'id': 2, 'payeeName': '王五', 'payeeAccountMasked': '****8806'},
         ]
+        # Day 7 directory search must return only candidates matching the query.
+        # An unfiltered mock incorrectly creates a multiple-recipient interrupt.
+        matching = [p for p in choices
+                    if ((name is not None and p['payeeName'] == name)
+                        or (phone is not None and p.get('phone') == phone))]
         return [{'recipientId': p['id'], 'payeeName': p['payeeName'],
-                 'accountMasked': p.get('payeeAccountMasked', '')} for p in choices]
+                 'accountMasked': p.get('payeeAccountMasked', '')} for p in matching]
 
     async def fake_confirm(recipient_id, bearer):
         assert (recipient_id, bearer) == (1, TOKEN)

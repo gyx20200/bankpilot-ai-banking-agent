@@ -44,7 +44,10 @@ public class SecurityConfig {
                 // 公开接口
                 .requestMatchers(
                     "/api/demo/health",
-                    "/api/auth/demo-login"
+                    "/api/auth/demo-login",
+                    "/api/auth/register", "/api/auth/login",
+                    "/api/auth/register",
+                    "/api/auth/login"
                 ).permitAll()
 
                 // 其他银行接口必须认证

@@ -39,7 +39,7 @@ public class TransferWorkflowService {
     }
 
     public record StatusView(long orderId, String payeeName, String accountMasked,
-                             BigDecimal amount, String riskLevel, String status, String message) { }
+                             BigDecimal amount, String riskLevel, String status, String message, String remark) { }
     public record ApprovalView(long orderId, String riskLevel, String status,
                                String result, int remainingAttempts) { }
     public record OtpView(long orderId, String result, int expiresInSeconds) { }
@@ -115,13 +115,13 @@ public class TransferWorkflowService {
     public StatusView status(long userId, long orderId) {
         loadOrder(userId,orderId,false); // verifies ownership before joining payee details
         var rows = jdbc.query("""
-            SELECT o.id,o.amount,o.risk_level,o.status,p.payee_name,a.account_no
+            SELECT o.id,o.amount,o.risk_level,o.status,o.remark,p.payee_name,a.account_no
             FROM transfer_orders o JOIN payees p ON p.id=o.payee_id
             JOIN accounts a ON a.id=o.receiver_account_id
             WHERE o.id=? AND o.user_id=?
             """, (rs,i)->new StatusView(rs.getLong("id"),rs.getString("payee_name"),
             AccountMasker.mask(rs.getString("account_no")),rs.getBigDecimal("amount"),
-            rs.getString("risk_level"),rs.getString("status"),null),orderId,userId);
+            rs.getString("risk_level"),rs.getString("status"),null,rs.getString("remark")),orderId,userId);
         return rows.get(0);
     }
 
@@ -240,41 +240,7 @@ public class TransferWorkflowService {
             audit(userId,orderId,"APPROVAL_CHECK","EXPIRED_OR_MISSING");
             return status(userId,orderId);
         }
-        // Lock accounts in a stable order to prevent deadlocks for opposite-direction transfers.
-        List<Account> accounts = jdbc.query("""
-            SELECT id,balance,status FROM accounts
-            WHERE id IN (?,?) ORDER BY id FOR UPDATE
-            """, (rs,i)->new Account(rs.getLong("id"),rs.getBigDecimal("balance"),rs.getString("status")),
-            order.senderId(),order.receiverId());
-        if (accounts.size() != 2) throw new IllegalStateException("Expected exactly two bank accounts");
-        Account sender = accounts.stream().filter(a->a.id()==order.senderId()).findFirst().orElseThrow();
-        Account receiver = accounts.stream().filter(a->a.id()==order.receiverId()).findFirst().orElseThrow();
-        if (sender.id()==receiver.id() || !"ACTIVE".equals(sender.status()) ||
-            !"ACTIVE".equals(receiver.status()) || sender.balance().compareTo(order.amount())<0) {
-            jdbc.update("UPDATE transfer_orders SET status='FAILED',updated_at=? WHERE id=?",
-                Timestamp.valueOf(now()),orderId);
-            audit(userId,orderId,"TRANSFER_EXECUTE","DECLINED");
-            return status(userId,orderId);
-        }
-        int debit = jdbc.update("UPDATE accounts SET balance=balance-? WHERE id=? AND balance>=? AND status='ACTIVE'",
-            order.amount(),order.senderId(),order.amount());
-        int credit = jdbc.update("UPDATE accounts SET balance=balance+? WHERE id=? AND status='ACTIVE'",
-            order.amount(),order.receiverId());
-        if (debit!=1 || credit!=1) throw new IllegalStateException("Atomic account update failed, transaction rolled back");
-        LocalDateTime timestamp = now();
-        jdbc.update("""
-            INSERT INTO transactions(account_id,direction,amount,category,merchant_name,description,occurred_at,transfer_order_id)
-            VALUES (?,'OUT',?,'转账','BankPilot模拟银行','模拟转账付款',?,?)
-            """,order.senderId(),order.amount(),Timestamp.valueOf(timestamp),orderId);
-        jdbc.update("""
-            INSERT INTO transactions(account_id,direction,amount,category,merchant_name,description,occurred_at,transfer_order_id)
-            VALUES (?,'IN',?,'转账','BankPilot模拟银行','模拟转账收款',?,?)
-            """,order.receiverId(),order.amount(),Timestamp.valueOf(timestamp),orderId);
-        int updated = jdbc.update("UPDATE transfer_orders SET status='SUCCESS',updated_at=? WHERE id=? AND status='AUTHORIZED'",
-            Timestamp.valueOf(timestamp),orderId);
-        if (updated!=1) throw new IllegalStateException("Order transition failed; transaction rolled back");
-        audit(userId,orderId,"TRANSFER_EXECUTE","SUCCESS");
-        return status(userId,orderId);
+        return bookTransfer(userId,orderId,order);
     }
 
     
@@ -347,6 +313,90 @@ public StatusView cancel(long userId, long orderId) {
 }
 
 
+
+    /** Shared Day6 bank ledger path: account locks, debit+credit, two legs and audit. */
+    private StatusView bookTransfer(long userId,long orderId,Order order){
+        // Lock accounts in a stable order to prevent deadlocks for opposite-direction transfers.
+        List<Account> accounts = jdbc.query("""
+            SELECT id,balance,status FROM accounts
+            WHERE id IN (?,?) ORDER BY id FOR UPDATE
+            """, (rs,i)->new Account(rs.getLong("id"),rs.getBigDecimal("balance"),rs.getString("status")),
+            order.senderId(),order.receiverId());
+        if (accounts.size() != 2) throw new IllegalStateException("Expected exactly two bank accounts");
+        Account sender = accounts.stream().filter(a->a.id()==order.senderId()).findFirst().orElseThrow();
+        Account receiver = accounts.stream().filter(a->a.id()==order.receiverId()).findFirst().orElseThrow();
+        if (sender.id()==receiver.id() || !"ACTIVE".equals(sender.status()) ||
+            !"ACTIVE".equals(receiver.status()) || sender.balance().compareTo(order.amount())<0) {
+            jdbc.update("UPDATE transfer_orders SET status='FAILED',updated_at=? WHERE id=?",
+                Timestamp.valueOf(now()),orderId);
+            audit(userId,orderId,"TRANSFER_EXECUTE","DECLINED");
+            return status(userId,orderId);
+        }
+        int debit = jdbc.update("UPDATE accounts SET balance=balance-? WHERE id=? AND balance>=? AND status='ACTIVE'",
+            order.amount(),order.senderId(),order.amount());
+        int credit = jdbc.update("UPDATE accounts SET balance=balance+? WHERE id=? AND status='ACTIVE'",
+            order.amount(),order.receiverId());
+        if (debit!=1 || credit!=1) throw new IllegalStateException("Atomic account update failed, transaction rolled back");
+        LocalDateTime timestamp = now();
+        jdbc.update("""
+            INSERT INTO transactions(account_id,direction,amount,category,merchant_name,description,occurred_at,transfer_order_id)
+            VALUES (?,'OUT',?,'转账','BankPilot模拟银行','模拟转账付款',?,?)
+            """,order.senderId(),order.amount(),Timestamp.valueOf(timestamp),orderId);
+        jdbc.update("""
+            INSERT INTO transactions(account_id,direction,amount,category,merchant_name,description,occurred_at,transfer_order_id)
+            VALUES (?,'IN',?,'转账','BankPilot模拟银行','模拟转账收款',?,?)
+            """,order.receiverId(),order.amount(),Timestamp.valueOf(timestamp),orderId);
+        int updated = jdbc.update("UPDATE transfer_orders SET status='SUCCESS',updated_at=? WHERE id=? AND status='AUTHORIZED'",
+            Timestamp.valueOf(timestamp),orderId);
+        if (updated!=1) throw new IllegalStateException("Order transition failed; transaction rolled back");
+        audit(userId,orderId,"TRANSFER_EXECUTE","SUCCESS");
+        return status(userId,orderId);
+    }
+
+    /** INTERNAL ONLY: trusted scheduler path, never exposed as an HTTP endpoint.
+     * Revalidates persistent schedule authorization and exact bank-order scope.
+     * Caller executes inside the same DB transaction as schedule claim.
+     */
+    @Transactional
+    public StatusView executePreauthorizedSchedule(long userId,long orderId,long scheduleId) {
+        lockUser(userId);
+        Order order=loadOrder(userId,orderId,true);
+        if ("SUCCESS".equals(order.status())) return status(userId,orderId);
+        if (!"PENDING_APPROVAL".equals(order.status())) conflict("Schedule bank order not pending");
+        var schedules=jdbc.queryForList("""
+            SELECT s.id,s.owner_user_id,s.sender_account_id,s.receiver_account_id,s.amount,
+                s.remark,s.scope_hash,s.scheduled_at_utc,s.status,s.transfer_order_id,
+                a.scope_hash AS auth_scope,a.covered_risk,a.auth_method,a.status AS auth_status,a.valid_until
+            FROM scheduled_transfers s
+            JOIN scheduled_transfer_authorizations a ON a.schedule_id=s.id
+            WHERE s.id=? AND s.owner_user_id=? FOR UPDATE
+            """,scheduleId,userId);
+        if(schedules.size()!=1) conflict("Schedule authorization not found");
+        var sc=schedules.get(0);
+        long link=((Number)sc.get("transfer_order_id")).longValue();
+        if(link!=orderId || !"PROCESSING".equals(sc.get("status")) ||
+                !"ACTIVE".equals(sc.get("auth_status")) ||
+                !order.amount().equals(((java.math.BigDecimal)sc.get("amount"))) ||
+                order.senderId()!=((Number)sc.get("sender_account_id")).longValue() ||
+                order.receiverId()!=((Number)sc.get("receiver_account_id")).longValue())
+            conflict("Schedule order binding mismatch");
+        var due=Day7ScheduledService.dbDateTime(sc.get("scheduled_at_utc"));
+        var fingerprint=Day7ScheduledService.scope(userId,order.senderId(),order.receiverId(),
+                order.amount(),due.toInstant(java.time.ZoneOffset.UTC),(String)sc.get("remark"));
+        if(!fingerprint.equals(sc.get("scope_hash")) || !fingerprint.equals(sc.get("auth_scope")) ||
+                (sc.get("valid_until")!=null && Day7ScheduledService.dbDateTime(sc.get("valid_until")).isBefore(LocalDateTime.now(java.time.ZoneOffset.UTC))) ||
+                (!"RED".equals(sc.get("covered_risk")) || !"DEMO_OTP".equals(sc.get("auth_method"))))
+            conflict("Schedule preauthorization scope/risk invalid");
+        jdbc.update("""
+            INSERT INTO approval_records(order_id,user_id,auth_method,approval_status,created_at,expires_at,authorized_at)
+            VALUES (?,?,?,'APPROVED',?,?,?)
+            """,orderId,userId,(String)sc.get("auth_method"),
+            Timestamp.valueOf(now()),Timestamp.valueOf(now().plusMinutes(5)),Timestamp.valueOf(now()));
+        jdbc.update("UPDATE transfer_orders SET status='AUTHORIZED',updated_at=? WHERE id=? AND status='PENDING_APPROVAL'",
+            Timestamp.valueOf(now()),orderId);
+        audit(userId,orderId,"SCHEDULE_PREAUTH","AUTHORIZED");
+        return bookTransfer(userId,orderId,order);
+    }
 
     private static String hash(String salt, String code) {
         try {
