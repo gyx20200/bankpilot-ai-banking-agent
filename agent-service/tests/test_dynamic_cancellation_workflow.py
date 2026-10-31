@@ -129,13 +129,28 @@ def test_transfer_plus_monthly_now_prepares_but_does_not_execute(monkeypatch):
                 'riskLevel': 'YELLOW', 'amount': amount, 'payeeName': '李四',
                 'accountMasked': '****5291'}
 
+    async def fake_search(token, *, name=None, phone=None):
+        assert token == TOKEN
+        assert name == '李四' and phone is None
+        events.append('registered_search')
+        return [{'recipientId': 1, 'payeeName': '李四',
+                 'accountMasked': '****5291'}]
+
+    async def fake_confirm(recipient_id, token):
+        assert (recipient_id, token) == (1, TOKEN)
+        events.append('registered_confirm')
+        return {'id': 1, 'payeeName': '李四',
+                'payeeAccountMasked': '****5291'}
+
     monkeypatch.setitem(reads.READ_EXECUTORS, 'payees', fake_payees)
+    monkeypatch.setattr(bank, 'search_registered_recipients', fake_search)
+    monkeypatch.setattr(bank, 'confirm_registered_recipient', fake_confirm)
     monkeypatch.setattr(bank, 'prepare_transfer', fake_transfer)
     result, _ = run('分析2026年9月收支，再给李四转200元')
     assert result['status'] == 'TRANSFER_PENDING_APPROVAL'
     assert result['transferOrder']['orderId'] == 'MOCK-1001'
     assert result.get('__interrupt__')
-    assert set(events) == {'monthly_analytics', 'get_payees', 'prepare_transfer'}
+    assert set(events) == {'monthly_analytics', 'get_payees', 'registered_search', 'registered_confirm', 'prepare_transfer'}
 
 
 def test_missing_month_asks_clarification_without_calls(monkeypatch):
