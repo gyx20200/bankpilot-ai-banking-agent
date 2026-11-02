@@ -66,7 +66,7 @@ bankpilot-project/
 
 ### 1. MySQL 数据库
 
-**已有 Day 6 数据库的团队联调环境：** 先备份，然后按 [`docs/部署说明.md`](部署说明.md) 创建隔离的 `bankpilot_day7_test` 数据库，恢复备份，并依次执行：
+**已有数据库的团队联调环境：** 先备份，然后按 [`docs/部署说明.md`](部署说明.md) 创建隔离的 `bankpilot_test` 数据库，恢复备份，并依次执行：
 
 ```text
 database/08_user_authentication.sql
