@@ -41,3 +41,6 @@ dist/
 # Operating system
 .DS_Store
 Thumbs.db
+
+# Local repository reorganization backups
+.repository_backups/
