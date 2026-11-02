@@ -21,7 +21,7 @@ FastAPI 网关（8000）
               MySQL 8
 ```
 
-开发时也可将银行 API 切换至独立的 **Python Day 7 内存 Mock（18080）**，用于不依赖 MySQL 的 UI/Agent 演示。Mock 重启即清空账户与预约，不能替代正式数据库持久化验证。
+开发时也可将银行 API 切换至独立的 **Python 内存 Mock（18080）**，用于不依赖 MySQL 的 UI/Agent 演示。Mock 重启即清空账户与预约，不能替代正式数据库持久化验证。
 
 ## 核心功能
 
@@ -42,16 +42,17 @@ FastAPI 网关（8000）
 
 ```text
 bankpilot-project/
-├── agent-service/           FastAPI、DeepSeek Planner、LangGraph、模拟银行及测试
+├── agent-service/           FastAPI、DeepSeek Planner、LangGraph、模拟银行
 │   ├── app/graph/           任务注册、任务规划、工作流、预约时间校验
 │   ├── mock_day7_backend.py 本地内存 Mock（可选）
 │   ├── .env.example         完整环境变量示例（不含密钥）
 │   └── tests/               Python 回归测试
 ├── banking-backend/        Spring Boot 银行 API 与测试
-├── database/               Day 1～Day 7 SQL 初始化、迁移与检查脚本
+├── database/               原迁移脚本、checks/、fixtures/、permissions/
 ├── frontend/               Vue 3 + Vite 聊天与任务中心
 ├── docs/                   接口契约、业务交接、联调说明
-└── tests/                  跨阶段的辅助冒烟测试
+├── tests/                  Python 回归测试及独立的 smoke/
+└── pytest.ini               默认只收集自动化测试
 ```
 
 ## 技术环境
@@ -65,19 +66,18 @@ bankpilot-project/
 
 ### 1. MySQL 数据库
 
-**已有 Day 6 数据库的团队联调环境：** 先备份，然后按 [`docs/Day7_后端部署联调指南.md`](docs/Day7_后端部署联调指南.md) 创建隔离的 `bankpilot_day7_test` 数据库，恢复备份，并依次执行：
+**已有 Day 6 数据库的团队联调环境：** 先备份，然后按 [`docs/部署说明.md`](部署说明.md) 创建隔离的 `bankpilot_day7_test` 数据库，恢复备份，并依次执行：
 
 ```text
-database/day7_01_auth.sql
-database/day7_02_recipients.sql    # 检查脚本
-database/day7_03_aa.sql
-database/day7_04_schedule.sql
-database/day7_05_audit.sql
-database/day7_06_test_db_grants.sql  # 管理员执行
-database/day7_check.sql
+database/08_user_authentication.sql
+database/checks/check_recipient_uniqueness.sql    # 检查脚本
+database/09_aa_collections.sql
+database/10_scheduled_transfers.sql
+database/11_business_audit.sql
+database/permissions/grant_test_database_access.sql  # 管理员执行
+database/checks/check_business_state.sql
 ```
 
-**全新环境：** `database/init.sql` 只是 Day 1 基础表和演示数据，**并非 Day 7 完整数据库初始化脚本**。必须依据 `database/` 中 Day 2～Day 6 迁移及现有联调文档先准备对应表，再执行 Day 7 增量脚本；不要把上述 SQL 直接套在只有 Day 1 表的数据库中。注意 Day 7 SQL 中 `USE bankpilot_day7_test` 的目标库名。
 
 > 迁移脚本不是可随意重复执行的初始化接口。操作前先备份并核实数据库目标，演示库不得使用真实客户数据。
 
@@ -169,15 +169,5 @@ mvn test
 - 普通转账按累计风控规则区别 YELLOW（人工确认）与 RED（OTP）；**单次定时转账无论金额都需要预约 OTP**。
 - 银行后端应负责事务一致性、双方流水、幂等和未知结果核实；模拟环境不能作为生产级资金系统。
 - 项目只用于教学/竞赛演示，禁止将调试开关、固定验证码、开发密钥或无鉴权端口用于生产。
-
-## 更多文档
-
-- [Day 7 Java/MySQL 本地部署与联调](docs/Day7_后端部署联调指南.md)
-- [Day 7 Java-Agent 接口契约](docs/day7-java-agent-contract.md)
-- [AA 业务交接](docs/DAY7-STAGE3-AA-HANDOFF.md)
-- [单次预约业务交接](docs/DAY7-STAGE4-SCHEDULE-HANDOFF.md)
-- [历史阶段开发与接口资料](docs/)（保留供追溯；最终行为以当前源码与银行 API 契约为准）
-
----
 
 **BankPilot · AI Banking Assistant** — 让复杂的模拟银行事务，通过自然语言与可信审批流程变得直观、可核查。
