@@ -20,6 +20,9 @@ def run(coro):
 
 @pytest.fixture
 def scenario(monkeypatch):
+    # 本文件模拟的是 Mock 银行，不是真实 Java 后端
+    monkeypatch.setattr(bank, "BANK_MODE", "mock")
+
     events = []
     order = {'orderId': 'MOCK-SC-1001', 'subscriptionId': 1,
              'status': 'PENDING_APPROVAL', 'subscriptionStatus': 'ACTIVE'}
