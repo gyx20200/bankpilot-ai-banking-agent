@@ -11,6 +11,7 @@ const conversations = ref([]);
 const activeConversationId = ref(null);
 const conversationLoading = ref(false);
 const conversationError = ref('');
+const pendingMessageWrite = ref(null); // D3 persistence patch
 const input = ref("");
 const token = ref(""); // Memory only. Never write to localStorage/sessionStorage.
 const currentUser = ref(null);
@@ -103,43 +104,37 @@ function headers(overrideToken = undefined) {
 }
 
 
+// D3 persistence patch: authenticated conversation CRUD
 async function loadConversations() {
+  if (!isAuthenticated.value) {
+    conversations.value = []
+    return
+  }
+
   conversationLoading.value = true
   conversationError.value = ''
 
   try {
-    const data = await req(
-        '/api/agent/conversations',
-        'GET'
-    )
-
-    conversations.value = data.items || []
-  } catch (e) {
-    conversationError.value = e.message
+    const data = await req('/api/agent/conversations', 'GET')
+    if (!Array.isArray(data.items)) {
+      throw new Error('会话列表响应缺少 items 数组')
+    }
+    conversations.value = data.items
+  } catch (error) {
+    conversationError.value = error.message || '会话列表加载失败'
   } finally {
     conversationLoading.value = false
   }
 }
 
 async function createConversation() {
-  if (!isAuthenticated.value || conversationLoading.value || pending.value) {
-    return
-  }
-
-  const data = await req(
-      '/api/agent/conversations',
-      'POST',
-      { title: '新会话' }
-  )
-
-  await loadConversations()
-  activeConversationId.value = data.conversationId
-
-  messages.value = []
-}
-
-async function selectConversation(conversationId) {
-  if (!isAuthenticated.value || busy.value || pending.value) {
+  if (
+    !isAuthenticated.value ||
+    busy.value ||
+    pending.value ||
+    conversationLoading.value ||
+    pendingMessageWrite.value
+  ) {
     return
   }
 
@@ -148,20 +143,76 @@ async function selectConversation(conversationId) {
 
   try {
     const data = await req(
-        `/api/agent/conversations/${conversationId}/messages`,
-        'GET'
+      '/api/agent/conversations',
+      'POST',
+      { title: '新会话' },
+      20000,
     )
 
-    activeConversationId.value = conversationId
+    if (!data?.conversationId) {
+      throw new Error('Java 未返回 conversationId')
+    }
 
-    messages.value = (data.items || []).map(item => ({
-      id: String(item.messageId),
-      role: item.role === 'USER' ? 'user' : 'assistant',
-      reply: item.content,
-      intent: 'history'
-    }))
-  } catch (e) {
-    conversationError.value = e.message
+    activeConversationId.value = data.conversationId
+    messages.value = []
+    await loadConversations()
+  } catch (error) {
+    conversationError.value = error.message || '创建会话失败'
+  } finally {
+    conversationLoading.value = false
+  }
+}
+
+async function selectConversation(conversationId) {
+  if (
+    !isAuthenticated.value ||
+    busy.value ||
+    pending.value ||
+    conversationLoading.value ||
+    pendingMessageWrite.value
+  ) {
+    return
+  }
+
+  if (!conversationId) return
+
+  conversationLoading.value = true
+  conversationError.value = ''
+
+  try {
+    const data = await req(
+      `/api/agent/conversations/${encodeURIComponent(conversationId)}/messages`,
+      'GET',
+      undefined,
+      20000,
+    )
+
+    if (!Array.isArray(data.items)) {
+      throw new Error('历史消息响应缺少 items 数组')
+    }
+
+    const restoredMessages = data.items.map((item) => {
+      if (!['USER', 'ASSISTANT'].includes(item.role)) {
+        throw new Error('历史消息包含不支持的 role')
+      }
+      if (typeof item.content !== 'string') {
+        throw new Error('历史消息 content 格式不正确')
+      }
+
+      return {
+        id: String(item.messageId),
+        role: item.role === 'USER' ? 'user' : 'assistant',
+        reply: item.content,
+        intent: 'history',
+        createdAt: item.createdAt,
+        persisted: true,
+      }
+    })
+
+    activeConversationId.value = conversationId
+    messages.value = restoredMessages
+  } catch (error) {
+    conversationError.value = error.message || '历史消息加载失败'
   } finally {
     conversationLoading.value = false
   }
@@ -303,6 +354,7 @@ function resetSession(message = "") {
   conversations.value = [];
   activeConversationId.value = null;
   conversationError.value = '';
+  pendingMessageWrite.value = null;
   conversationLoading.value = false;
   settingsOpen.value = false;
   taskCenterOpen.value = false;
@@ -384,52 +436,145 @@ function fillExample(example) {
   document.getElementById("bank-command")?.focus();
 }
 
+// D3 persistence patch: persist USER message before invoking Agent workflow
 async function send() {
-  const message = input.value.trim();
-  if (!message || busy.value) return;
+  const message = input.value.trim()
+  if (!message || busy.value) return
+
   if (pending.value) {
-    pushAssistant(
-      "请先完成当前审批，或刷新并核查原订单状态；暂不创建新的敏感订单。",
-    );
-    await scroll();
-    return;
+    pushAssistant('请先完成当前审批，或刷新并核查原订单状态；暂不创建新的敏感订单。')
+    await scroll()
+    return
   }
+
   if (!token.value.trim()) {
-    pushAssistant("请先登录银行账户。");
-    await scroll();
-    return;
+    pushAssistant('请先登录银行账户。')
+    await scroll()
+    return
   }
-  busy.value = true;
-  input.value = "";
-  messages.value.push({
-    id: crypto.randomUUID(),
-    role: "user",
-    reply: message,
-  });
-  await scroll();
+
+  // If the previous message-write response was lost, only retry the exact same
+  // content with the same requestId. Do not silently create a duplicate.
+  if (
+    pendingMessageWrite.value &&
+    pendingMessageWrite.value.content !== message
+  ) {
+    pushAssistant('上一条消息的保存结果尚未确认。请先重新发送完全相同的内容以复用原 requestId，或刷新会话核对历史记录。')
+    await scroll()
+    return
+  }
+
+  busy.value = true
+  input.value = ''
+  let userMessagePersisted = false
+
   try {
-    const data = await req("/api/agent/workflows/dynamic/start", "POST", {
-      message,
-    });
+    // Create a persistent conversation on the first message.
+    if (!activeConversationId.value) {
+      const created = await req(
+        '/api/agent/conversations',
+        'POST',
+        { title: '新会话' },
+        20000,
+      )
+
+      if (!created?.conversationId) {
+        throw new Error('创建会话失败：Java 未返回 conversationId')
+      }
+
+      activeConversationId.value = created.conversationId
+      await loadConversations()
+      if (!isAuthenticated.value || !activeConversationId.value) {
+        throw new Error('登录状态已失效，请重新登录')
+      }
+    }
+
+    let writeRequest = pendingMessageWrite.value
+
+    if (writeRequest && writeRequest.conversationId !== activeConversationId.value) {
+      throw new Error('待确认消息属于另一个会话，请先核对原会话')
+    }
+
+    if (!writeRequest) {
+      writeRequest = {
+        conversationId: activeConversationId.value,
+        content: message,
+        requestId: crypto.randomUUID(),
+      }
+      pendingMessageWrite.value = writeRequest
+    }
+
+    // Public API accepts content + requestId only. Java must force role=USER.
+    await req(
+      `/api/agent/conversations/${encodeURIComponent(activeConversationId.value)}/messages`,
+      'POST',
+      {
+        content: message,
+        requestId: writeRequest.requestId,
+      },
+      20000,
+    )
+
+    userMessagePersisted = true
+    pendingMessageWrite.value = null
+
+    messages.value.push({
+      id: writeRequest.requestId,
+      role: 'user',
+      reply: message,
+      persisted: true,
+    })
+
+    await scroll()
+
+    // Keep the existing Agent/Workflow invocation unchanged after persistence.
+    const data = await req(
+      '/api/agent/workflows/dynamic/start',
+      'POST',
+      { message },
+    )
+
     messages.value.push({
       id: crypto.randomUUID(),
-      role: "assistant",
-      intent: "dynamic",
+      role: 'assistant',
+      intent: 'dynamic',
       reply: summary(data),
       data,
       originalMessage: message,
       uncertain: false,
-      actionError: "",
-    });
-  } catch (e) {
-    // A POST may have reached the bank even when its HTTP response was lost.
-    pushAssistant(
-      `任务提交未能确认：${e.message}${e.uncertain || e.httpStatus === 409 || e.httpStatus >= 500 ? " 可能已生成银行申请或存在未处理订单，暂不要重复发送同一指令。" : e.httpStatus === 422 ? " 请重新输入含完整参数的业务指令。" : ""}`,
-      { intent: "error" },
-    );
+      actionError: '',
+    })
+  } catch (error) {
+    if (!userMessagePersisted) {
+      // Deterministic client errors can be corrected with a new requestId.
+      // 409 and network/5xx outcomes remain uncertain and keep the same ID.
+      if (
+        error.httpStatus >= 400 &&
+        error.httpStatus < 500 &&
+        error.httpStatus !== 409
+      ) {
+        pendingMessageWrite.value = null
+      }
+
+      if (isAuthenticated.value) {
+        input.value = message
+        pushAssistant(
+          `用户消息尚未确认写入会话：${error.message}。本次没有继续启动 Agent 任务。若请求超时，请先刷新会话核对是否已经保存，再决定是否重试。`,
+          { intent: 'error' },
+        )
+      } else {
+        authNotice.value = `登录状态可能已失效：${error.message}`
+      }
+    } else {
+      // The USER message is persisted; only the subsequent Agent task failed.
+      pushAssistant(
+        `任务提交未能确认：${error.message}${error.uncertain || error.httpStatus === 409 || error.httpStatus >= 500 ? ' 可能已生成银行申请或存在未处理订单，暂不要重复发送同一指令。' : error.httpStatus === 422 ? ' 请重新输入含完整参数的业务指令。' : ''}`,
+        { intent: 'error' },
+      )
+    }
   } finally {
-    busy.value = false;
-    await scroll();
+    busy.value = false
+    await scroll()
   }
 }
 
@@ -694,7 +839,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKeydown));
 </script>
 
 <template>
-  <div class="layout bp-shell" :class="{ 'bp-auth-shell': !isAuthenticated }">
+  <div class="layout bp-shell" :class="{ 'bp-auth-shell': !isAuthenticated, 'has-conversation-sidebar': isAuthenticated }">
     <!-- 只有登录后才显示历史会话侧边栏 -->
     <ConversationSidebar
         v-if="isAuthenticated"
