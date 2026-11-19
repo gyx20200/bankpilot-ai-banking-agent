@@ -53,6 +53,26 @@ def assistant_reply_text(view: dict) -> str:
                 expense = _money(data.get("totalExpense"))
                 if isinstance(label, str) and income and expense:
                     notes.append(f"{label} 收入 {income}、支出 {expense}")
+        annual = reads.get("annual_analytics", {})
+        if annual.get("status") == "SUCCESS":
+            data = annual.get("data") or {}
+            if isinstance(data, dict):
+                year = data.get("year")
+                income = _money(data.get("totalIncome"))
+                expense = _money(data.get("totalExpense"))
+                net = _money(data.get("netCashFlow"))
+                if isinstance(year, str) and income and expense and net:
+                    period = "年度累计（截至当时查询）" if data.get("periodType") == "YEAR_TO_DATE" else "完整年度"
+                    notes.append(f"{year}年{period}：收入 {income}、支出 {expense}、净现金流 {net}")
+        anomalies = reads.get("transaction_anomalies", {})
+        if anomalies.get("status") == "SUCCESS":
+            data = anomalies.get("data") or {}
+            if isinstance(data, dict):
+                month = data.get("month")
+                scanned = data.get("scannedCount")
+                count = data.get("anomalyCount")
+                if isinstance(month, str) and type(scanned) is int and type(count) is int:
+                    notes.append(f"{month} 已扫描{scanned}笔支出，发现{count}条待核实规则事件；不代表确认盗刷或重复扣款")
         for task, label in (("get_transactions", "最近交易"),
                             ("get_payees", "收款人"),
                             ("list_subscriptions", "订阅代扣")):

@@ -9,6 +9,13 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import urlencode
 from typing import Any
 import httpx
+from app.analytics_contract import (
+    AnalyticsContractError,
+    valid_year,
+    valid_month,
+    validate_annual_report,
+    validate_anomaly_report,
+)
 
 READ_URL = os.environ.get("BANK_API_BASE", "http://127.0.0.1:8080/api/demo").rstrip("/")
 TRANSFER_URL = os.environ.get("BANK_TRANSFER_API_BASE", "http://127.0.0.1:8080/api/transfers").rstrip("/")
@@ -102,6 +109,54 @@ async def get_monthly_analytics(month: str, bearer: str | None):
         if not amount.is_finite():
             raise BankError("银行返回的收支金额格式不正确。")
     return report
+
+
+async def get_annual_analytics(
+    year: str,
+    bearer: str | None,
+):
+    if not bearer or not bearer.startswith("Bearer ") or not bearer[7:].strip():
+        raise BankError("请先登录。", 401)
+
+    if not valid_year(year):
+        raise BankError("年度必须使用有效的 YYYY 格式。", 400)
+
+    query = urlencode({"year": year})
+
+    report = await _request(
+        "GET",
+        f"{READ_URL}/analytics/annual?{query}",
+        bearer,
+    )
+
+    try:
+        return validate_annual_report(report, year)
+    except AnalyticsContractError as exc:
+        raise BankError(str(exc), 502) from exc
+
+
+async def get_transaction_anomalies(
+    month: str,
+    bearer: str | None,
+):
+    if not bearer or not bearer.startswith("Bearer ") or not bearer[7:].strip():
+        raise BankError("请先登录。", 401)
+
+    if not valid_month(month):
+        raise BankError("月份必须使用有效的 YYYY-MM 格式。", 400)
+
+    query = urlencode({"month": month})
+
+    report = await _request(
+        "GET",
+        f"{READ_URL}/analytics/anomalies?{query}",
+        bearer,
+    )
+
+    try:
+        return validate_anomaly_report(report, month)
+    except AnalyticsContractError as exc:
+        raise BankError(str(exc), 502) from exc
 
 
 def _validate_order(value):
