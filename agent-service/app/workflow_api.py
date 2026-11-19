@@ -167,8 +167,28 @@ async def dynamic_start(body: StartBody, authorization: str | None = Header(defa
         raise HTTPException(422, 'conversationId 与 userMessageRequestId 必须同时提供。')
     thread = str(uuid4())
     try:
-        state = await dynamic_graph.ainvoke({'message': body.message}, _config(thread),
-                                            context={'authorization': authorization})
+        # 1. 先验证用户身份
+
+        # 2. 如果提供了 conversationId，
+        #    从 Java 获取历史消息
+        planner_context = None
+
+        if body.conversationId:
+            planner_context = await load_planner_context(
+                conversation_id=body.conversationId,
+                current_message=body.message,
+                authorization=authorization,
+            )
+
+        # 3. 将 Context 传给 LangGraph
+        state = await dynamic_graph.ainvoke(
+            {'message': body.message},
+            _config(thread),
+            context={
+                'authorization': authorization,
+                'planner_context': planner_context,
+            }
+        )
     except PlannerError as exc:
         raise HTTPException(422, str(exc)) from exc
     except bank.BankError as exc:

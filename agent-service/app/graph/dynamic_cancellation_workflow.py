@@ -25,6 +25,7 @@ from app.graph.transfer_approval_nodes import (
 
 class Context(TypedDict):
     authorization: str
+    planner_context: NotRequired[dict | None]
     transferOtpCode: NotRequired[str | None]
 
 
@@ -66,9 +67,26 @@ class State(TypedDict, total=False):
     scheduledDecision: bool
 
 
-async def plan_node(state: State) -> dict:
-    plan = await plan_tasks(state['message'])
-    return {'plan': plan.model_dump(mode='json', exclude_none=True)}
+async def plan_node(
+        state: State,
+        runtime: Runtime[Context],
+) -> dict:
+
+    planner_context = runtime.context.get(
+        'planner_context'
+    )
+
+    plan = await plan_tasks(
+        state['message'],
+        planner_context=planner_context,
+    )
+
+    return {
+        'plan': plan.model_dump(
+            mode='json',
+            exclude_none=True
+        )
+    }
 
 
 def validate_node(state: State) -> dict:

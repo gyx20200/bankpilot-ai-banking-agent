@@ -17,3 +17,10 @@ def context_from_java_response(
         current_message=current_message,
         history=response["items"],
     )
+
+async def load_planner_context(
+        conversation_id,
+        current_message,
+        authorization,
+):
+    ...
