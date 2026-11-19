@@ -814,3 +814,38 @@ html,body,#app{width:100%;min-width:320px;max-width:100%;min-height:100%;overflo
  .auth-landing .auth-form .auth-input-wrap input,.auth-landing .auth-panel:has(#bank-confirm-password) .auth-form .auth-input-wrap input{height:48px}
  .auth-landing .auth-panel h1{font-size:25px}
 }
+
+/* D3 conversation sidebar layout patch */
+.bp-shell.has-conversation-sidebar {
+  display: flex !important;
+  flex-direction: row;
+  align-items: stretch;
+}
+.bp-shell.has-conversation-sidebar > .conversation-sidebar {
+  flex: 0 0 240px;
+  width: 240px;
+  height: 100vh;
+  min-height: 100vh;
+}
+.bp-shell.has-conversation-sidebar > .bp-main {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+@media (max-width: 750px) {
+  .bp-shell.has-conversation-sidebar {
+    flex-direction: column;
+  }
+  .bp-shell.has-conversation-sidebar > .conversation-sidebar {
+    flex: 0 0 auto;
+    width: 100%;
+    height: auto;
+    min-height: 0;
+    max-height: 150px;
+    border-right: 0;
+    border-bottom: 1px solid #e5ebf2;
+  }
+  .bp-shell.has-conversation-sidebar > .bp-main {
+    height: calc(100vh - 150px);
+  }
+}

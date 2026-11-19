@@ -10,6 +10,7 @@ import logging
 import re
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
+from app.conversation_api import router as conversation_router
 from app.router import Intent, parse_intent, extract_month
 from app.transfer_parser import TransferIntent
 from app import llm_router
@@ -24,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 app = FastAPI(title="BankPilot Agent Day 6", version="0.6.0")
 app.include_router(workflow_router)
 app.include_router(auth_router)
+app.include_router(conversation_router)
 app.include_router(aa_router)
 app.include_router(schedule_router)
 
