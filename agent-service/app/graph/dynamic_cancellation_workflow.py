@@ -15,6 +15,7 @@ from app import banking_client as bank
 from app.graph.task_planner import plan_tasks
 from app.graph.dynamic_read_workflow import READ_TASK_TYPES, execute_read
 from app.graph.task_registry import TASK_REGISTRY
+from app.context.models import PlannerContext
 from app.graph.transfer_prepare import prepare_verified_transfer
 from app.graph.transfer_approval_nodes import (
     assign_transfer_approval_ids, wait_transfer_approval, after_transfer_decision,
@@ -25,7 +26,7 @@ from app.graph.transfer_approval_nodes import (
 
 class Context(TypedDict):
     authorization: str
-    planner_context: NotRequired[dict | None]
+    planner_context: NotRequired[PlannerContext | None]
     transferOtpCode: NotRequired[str | None]
 
 
@@ -76,10 +77,13 @@ async def plan_node(
         'planner_context'
     )
 
-    plan = await plan_tasks(
-        state['message'],
-        planner_context=planner_context,
-    )
+    if planner_context is None:
+        plan = await plan_tasks(state['message'])
+    else:
+        plan = await plan_tasks(
+            state['message'],
+            planner_context=planner_context,
+        )
 
     return {
         'plan': plan.model_dump(

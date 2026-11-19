@@ -17,6 +17,7 @@ from app import banking_client as bank
 from app.assistant_history import (
     AssistantHistoryError, assistant_reply_text, save_assistant_reply,
 )
+from app.context.history_client import load_planner_context
 from app.graph.dynamic_cancellation_workflow import dynamic_graph
 from app.graph.task_planner import PlannerError
 
