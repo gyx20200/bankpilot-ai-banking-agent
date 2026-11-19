@@ -1,6 +1,8 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import MonthlyAnalyticsCard from './MonthlyAnalyticsCard.vue'
+import AnnualAnalyticsCard from './AnnualAnalyticsCard.vue'
+import TransactionAnomalyCard from './TransactionAnomalyCard.vue'
 
 const props = defineProps({
   task: { type: Object, required: true },
@@ -32,14 +34,49 @@ const transactions = computed(() => results.value.get_transactions?.status === '
 const payees = computed(() => results.value.get_payees?.status === 'SUCCESS' && Array.isArray(results.value.get_payees.data) ? results.value.get_payees.data : null)
 const subscriptions = computed(() => results.value.list_subscriptions?.status === 'SUCCESS' && Array.isArray(results.value.list_subscriptions.data) ? results.value.list_subscriptions.data : null)
 const monthly = computed(() => results.value.monthly_analytics?.status === 'SUCCESS' ? results.value.monthly_analytics.data : null)
+const annual = computed(() =>
+  results.value.annual_analytics?.status === 'SUCCESS'
+    ? results.value.annual_analytics.data
+    : null
+)
+
+const anomalies = computed(() =>
+  results.value.transaction_anomalies?.status === 'SUCCESS'
+    ? results.value.transaction_anomalies.data
+    : null
+)
 const requested = computed(() => new Set(planTasks.value.map(t => t.type)))
 const showBalance = computed(() => balance.value && requested.value.has('get_balance'))
 const showTransactions = computed(() => transactions.value && requested.value.has('get_transactions'))
 const showPayees = computed(() => payees.value && requested.value.has('get_payees'))
 const showSubscriptions = computed(() => subscriptions.value && requested.value.has('list_subscriptions'))
 const showMonthly = computed(() => monthly.value && requested.value.has('monthly_analytics'))
-const hasVisibleRead = computed(() => showBalance.value || showTransactions.value || showPayees.value || showSubscriptions.value || showMonthly.value)
-const readCount = computed(() => [showBalance, showTransactions, showPayees, showSubscriptions, showMonthly].filter(flag => Boolean(flag.value)).length)
+const showAnnual = computed(() =>
+  annual.value && requested.value.has('annual_analytics')
+)
+const showAnomalies = computed(() =>
+  anomalies.value && requested.value.has('transaction_anomalies')
+)
+const hasVisibleRead = computed(() =>
+  showBalance.value ||
+  showTransactions.value ||
+  showPayees.value ||
+  showSubscriptions.value ||
+  showMonthly.value ||
+  showAnnual.value ||
+  showAnomalies.value
+)
+const readCount = computed(() =>
+  [
+    showBalance,
+    showTransactions,
+    showPayees,
+    showSubscriptions,
+    showMonthly,
+    showAnnual,
+    showAnomalies,
+  ].filter(flag => Boolean(flag.value)).length
+)
 const technicalOpen = ref(false)
 const recipientChoices = computed(() => Array.isArray(props.task.recipientChoices) ? props.task.recipientChoices : [])
 const choosingRecipient = computed(() => status.value === 'WAITING_RECIPIENT_SELECTION' && recipientChoices.value.length > 1)
@@ -49,7 +86,8 @@ const taskNames = {
   get_balance: '查询余额', get_transactions: '最近交易', get_payees: '查询收款人',
   monthly_analytics: '月度收支分析', list_subscriptions: '查询代扣订阅',
   transfer_prepare: '模拟转账', cancel_subscription: '取消代扣',
-  create_aa_collection: 'AA收款', schedule_transfer: '定时转账',
+  create_aa_collection: 'AA收款', schedule_transfer: '定时转账', annual_analytics: '年度收支分析',
+  transaction_anomalies: '异常交易检测',
 }
 const states = {
   COMPLETED: '任务完成', REJECTED: '用户已拒绝', NOT_CONFIRMED: '银行结果待核查',
@@ -77,6 +115,13 @@ function money(value) {
 function when(t) { return t.occurredAt || t.occurred_at || '' }
 function merchant(s) { return s.merchantName || s.merchant_name || '未知商户' }
 function labelOf(item) {
+  if (item.type === 'annual_analytics') {
+    return `${taskNames[item.type]}（${item.year || '年份待确认'}）`
+  }
+
+  if (item.type === 'transaction_anomalies') {
+    return `${taskNames[item.type]}（${item.month || '月份待确认'}）`
+  }
   if (item.type === 'monthly_analytics') return `${taskNames[item.type]}（${item.month || '月份待确认'}）`
   if (item.type === 'schedule_transfer') return `${taskNames[item.type]}（${money(item.amount)}，${item.execute_at || '待确认时间'}）`
   if (item.type === 'transfer_prepare') return `${taskNames[item.type]}（${item.payee_name || item.payee_phone || '未知'}，${money(item.amount)}）`
@@ -149,6 +194,8 @@ function reject(kind) {
     </div>
 
     <MonthlyAnalyticsCard v-if="showMonthly" :data="monthly" />
+    <AnnualAnalyticsCard v-if="showAnnual" :data="annual" />
+    <TransactionAnomalyCard v-if="showAnomalies" :data="anomalies" />
 
     <div v-if="choosingRecipient" class="result-card recipient-picker" aria-label="选择重名收款人">
       <div class="result-title"><span class="result-glyph blue" aria-hidden="true">◎</span><div><strong>请选择正确的收款人</strong><small>同名用户需要人工选择；目前未创建转账订单</small></div></div>

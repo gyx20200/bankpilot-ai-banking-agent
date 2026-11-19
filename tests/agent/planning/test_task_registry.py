@@ -6,9 +6,17 @@ from app.graph.task_registry import TASK_REGISTRY, TaskSpec, resolve_execution_o
 
 def test_all_existing_business_tasks_are_registered():
     assert set(TASK_REGISTRY) == {
-        "get_balance", "get_transactions", "get_payees",
-        "monthly_analytics", "list_subscriptions", "transfer_prepare",
-        "cancel_subscription", "create_aa_collection", "schedule_transfer",
+        "get_balance",
+        "get_transactions",
+        "get_payees",
+        "monthly_analytics",
+        "annual_analytics",
+        "transaction_anomalies",
+        "list_subscriptions",
+        "transfer_prepare",
+        "cancel_subscription",
+        "create_aa_collection",
+        "schedule_transfer",
     }
 
 

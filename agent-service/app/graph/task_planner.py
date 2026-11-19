@@ -17,6 +17,11 @@ from app.graph.task_registry import TASK_REGISTRY, resolve_execution_order
 from app.transfer_parser import normalize_amount
 from app.graph.schedule_time import CN, validate_schedule_time
 from app.context.models import PlannerContext
+from app.analytics_contract import (
+    explicit_annual_year,
+    valid_year,
+    valid_month,
+)
 
 
 class PlannerError(Exception):
@@ -27,6 +32,7 @@ class Task(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     type: str
     month: str | None = None
+    year: str | None = None
     target_name: str | None = None
     payee_name: str | None = None
     payee_phone: str | None = None
@@ -222,9 +228,21 @@ def validate_plan(raw: dict, today: date | None = None, message: str | None = No
 
         # Parameters must match the registered task rather than just matching
         # the generic Task model. No account numbers, IDs or executor URLs here.
-        for name in ("month", "target_name", "payee_name", "payee_phone", "remark", "amount", "aa_participants", "aa_mode", "aa_reason", "execute_at", "time_expression"):
+        for name in ("month", "year", "target_name", "payee_name", "payee_phone", "remark", "amount", "aa_participants", "aa_mode", "aa_reason", "execute_at", "time_expression"):
             if name not in spec.required_params and name in task.model_fields_set:
                 raise PlannerError(f"任务 {task.type} 不接受参数 {name}。")
+
+        if task.type == "annual_analytics":
+            if not valid_year(task.year) or int(task.year) > current.year:
+                return _clarify(draft.tasks,"请提供有效的历史或当前年份，例如2026年度。")
+            if message is not None and explicit_annual_year(message) != task.year:
+                return _clarify(draft.tasks,"请在当前指令中明确指定年度，例如2026年度；不能将某个月份当成年度请求。")
+
+        if task.type == "transaction_anomalies":
+            if not valid_month(task.month) or task.month > current_month:
+                return _clarify(draft.tasks,"请提供有效的历史或当前月份，例如2026年10月。")
+            if message is not None and _month_in_request(message, current) != task.month:
+                return _clarify(draft.tasks,"请在当前指令中明确指定异常检测月份，例如2026年10月。")
 
         if task.type == "monthly_analytics":
             if task.month is None:
@@ -333,7 +351,11 @@ def validate_plan(raw: dict, today: date | None = None, message: str | None = No
 TASK_PARAMETER_SCHEMAS = {
     "month": {
         "type": "string",
-        "description": "月度收支分析月份 YYYY-MM"
+        "description": "月度收支或异常检测的月份 YYYY-MM"
+    },
+    "year": {
+        "type": "string",
+        "description": "当前用户明确指定的年度 YYYY，例如2026；不要从某个年月中擅自提取年度任务"
     },
     "target_name": {
         "type": "string",
@@ -465,6 +487,12 @@ async def plan_tasks(message: str, planner_context: PlannerContext | None = None
         "每个任务只输出 type 和自身允许的参数，"
         "无关参数必须省略，不要填 null 占位。"
         "月度月份规范化为 YYYY-MM，未提供月份就省略 month。"
+        "年度收支、年度账单、年度分类和月度趋势使用 annual_analytics，参数 year 为当前原话明确的四位年度。"
+        "用户只指定某个年月时，不把它误判为年度任务。"
+        "大额支出、异常交易、疑似重复扣费检测使用 transaction_anomalies，参数 month 为当前原话明确的月份 YYYY-MM。"
+        "仅月度收支允许在现有安全校验下继承历史月份的年份；年度与异常检测必须有当前明确期间。"
+        "若用户同时要求年度分析和某月异常检测，分别规划两个只读任务，不丢失其中任何一项。"
+        "异常规则命中不是确认盗刷，不执行冻结、退款或资金变更。"
         "即时转账只规划 transfer_prepare；涉及预约/定时/未来时间转账必须规划 schedule_transfer，绝不能当作即时转账执行；"
         "预约只允许单次，收款人和数字金额必须在原话中出现。"
         "对 schedule_transfer 必须提供 time_expression 和 execute_at："
