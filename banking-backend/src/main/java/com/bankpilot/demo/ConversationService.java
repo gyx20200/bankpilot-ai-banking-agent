@@ -291,6 +291,54 @@ public class ConversationService {
         return new MessageList(id, rows.stream().map(MessageRow::view).toList(), nextBeforeId);
     }
 
+    /**
+     * Write only the textual assistant reply derived by the trusted Agent.
+     * The referenced USER request must exist in the SAME owned conversation.
+     * A row lock makes same-key retries idempotent. No workflow is re-executed.
+     */
+    @Transactional
+    public WriteResult appendAssistantMessage(long userId, String conversationId,
+            String rawContent, String rawRequestId, String rawUserRequestId,
+            String rawUserContent) {
+        String id = uuid(conversationId);
+        String key = requestId(rawRequestId);
+        String sourceKey = requestId(rawUserRequestId);
+        String content = safeMessage(rawContent);
+
+        requireActive(userId, id, true);
+        MessageRow original = findMessage(id, sourceKey);
+        if (original == null || !"USER".equals(original.role())
+                || !original.content().equals(safeMessage(rawUserContent))) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Referenced user message is absent or does not match the request");
+        }
+        MessageRow previous = findMessage(id, key);
+        if (previous != null) {
+            if (!"ASSISTANT".equals(previous.role())
+                    || !content.equals(previous.content())) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT,
+                        "requestId already used for different assistant content");
+            }
+            return new WriteResult(previous.view(), false);
+        }
+        LocalDateTime now = nowUtc();
+        Timestamp ts = Timestamp.valueOf(now);
+        jdbc.update("""
+                INSERT INTO agent_messages
+                  (conversation_id,role,content,request_id,created_at)
+                VALUES (?,'ASSISTANT',?,?,?)
+                """, id, content, key, ts);
+        jdbc.update("""
+                UPDATE agent_conversations SET updated_at=?
+                WHERE id=? AND user_id=? AND status='ACTIVE'
+                """, ts, id, userId);
+        MessageRow created = findMessage(id, key);
+        if (created == null) {
+            throw new IllegalStateException("Stored assistant message cannot be read back");
+        }
+        return new WriteResult(created.view(), true);
+    }
+
     @Transactional
     public WriteResult appendUserMessage(long userId, String conversationId,
                                          String rawContent, String rawRequestId) {

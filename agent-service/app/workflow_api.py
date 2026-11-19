@@ -7,13 +7,16 @@ Banking backends independently enforce user ownership, risk controls and idempot
 import asyncio
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Header, HTTPException
 from langgraph.types import Command
 from pydantic import BaseModel, Field, StrictBool
 
 from app import banking_client as bank
+from app.assistant_history import (
+    AssistantHistoryError, assistant_reply_text, save_assistant_reply,
+)
 from app.graph.dynamic_cancellation_workflow import dynamic_graph
 from app.graph.task_planner import PlannerError
 
@@ -29,6 +32,10 @@ _EXPIRY = timedelta(minutes=30)
 
 class StartBody(BaseModel):
     message: str = Field(min_length=1, max_length=300)
+    conversationId: UUID | None = None
+    userMessageRequestId: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9_-]{8,64}$"
+    )
 
 
 class ThreadBody(BaseModel):
@@ -154,6 +161,10 @@ def _aa_draft_matches(expected: dict, actual: dict) -> bool:
 @router.post('/dynamic/start')
 async def dynamic_start(body: StartBody, authorization: str | None = Header(default=None)):
     owner_user_id = await _authenticated_user(authorization)
+    has_conversation = body.conversationId is not None
+    has_source = body.userMessageRequestId is not None
+    if has_conversation != has_source:
+        raise HTTPException(422, 'conversationId 与 userMessageRequestId 必须同时提供。')
     thread = str(uuid4())
     try:
         state = await dynamic_graph.ainvoke({'message': body.message}, _config(thread),
@@ -168,6 +179,31 @@ async def dynamic_start(body: StartBody, authorization: str | None = Header(defa
         _sessions[thread] = {'ownerUserId': owner_user_id, 'expires': datetime.now(timezone.utc) + _EXPIRY,
                              'finished': False, 'decision': None, 'last': view}
         _locks[thread] = asyncio.Lock()
+
+    # Saving the reply is a HISTORY operation, not a banking action. Never
+    # execute the Graph again if this write times out or Java is unavailable.
+    reply = assistant_reply_text(view)
+    view['assistantReply'] = reply
+    if has_conversation:
+        try:
+            view['assistantReply'] = await save_assistant_reply(
+                conversation_id=str(body.conversationId),
+                user_message_request_id=body.userMessageRequestId,
+                user_message_content=body.message,
+                authorization=authorization,
+                reply=reply,
+            )
+            view['assistantPersisted'] = True
+        except AssistantHistoryError as exc:
+            print(f"[D3 AssistantHistory] {exc}", flush=True)
+            view['assistantPersisted'] = False
+            view['assistantHistoryWarning'] = (
+                '助手回复未确认写入历史。请核对当前会话记录；'
+                '不要为了保存回复而重复发送转账或审批指令。'
+            )
+    else:
+        # Backward compatibility for existing workflow API callers.
+        view['assistantPersisted'] = False
     return view
 
 

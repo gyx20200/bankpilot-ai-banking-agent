@@ -531,19 +531,32 @@ async function send() {
     const data = await req(
       '/api/agent/workflows/dynamic/start',
       'POST',
-      { message },
+      {
+        message,
+        conversationId: activeConversationId.value,
+        userMessageRequestId: writeRequest.requestId,
+      },
     )
 
     messages.value.push({
       id: crypto.randomUUID(),
       role: 'assistant',
       intent: 'dynamic',
-      reply: summary(data),
+      reply: typeof data.assistantReply === 'string'
+        ? data.assistantReply : summary(data),
+      persisted: data.assistantPersisted === true,
       data,
       originalMessage: message,
       uncertain: false,
       actionError: '',
     })
+    if (data.assistantPersisted === false) {
+      pushAssistant(
+        data.assistantHistoryWarning ||
+        '助手回复尚未确认持久化，请核对历史；不要重复执行银行任务。',
+        { intent: 'notice' },
+      )
+    }
   } catch (error) {
     if (!userMessagePersisted) {
       // Deterministic client errors can be corrected with a new requestId.
