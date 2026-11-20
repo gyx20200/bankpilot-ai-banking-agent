@@ -44,3 +44,9 @@ Thumbs.db
 
 # Local repository reorganization backups
 .repository_backups/
+
+# D5 local checkpoint state: never commit bank workflow snapshots
+agent-service/data/
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal

@@ -4,6 +4,7 @@ import DynamicWorkflowCard from "./components/DynamicWorkflowCard.vue";
 import AuthPanel from "./components/AuthPanel.vue";
 import AaCenter from "./components/AaCenter.vue";
 import ScheduleCenter from "./components/ScheduleCenter.vue";
+import WorkflowRecoveryCenter from "./components/WorkflowRecoveryCenter.vue";
 import ConversationSidebar from './components/ConversationSidebar.vue';
 
 // Day 6 4G: one input -> dynamic planner -> LangGraph -> bank. No direct Java call.
@@ -26,6 +27,7 @@ const workingThread = ref(null);
 const lastRef = ref(null);
 const aaCenter = ref(null);
 const scheduleCenter = ref(null);
+const recoveryCenter = ref(null);
 const messages = ref([
   {
     id: "welcome",
@@ -75,7 +77,8 @@ function showTaskCenter(tab = "aa") {
   nextTick(() => {
     taskCloseButton.value?.focus();
     if (tab === "aa") aaCenter.value?.refresh();
-    else scheduleCenter.value?.refresh();
+    else if (tab === "schedule") scheduleCenter.value?.refresh();
+    else if (tab === "workflow") recoveryCenter.value?.refresh();
   });
 }
 function closeTaskCenter() {
@@ -86,7 +89,8 @@ function closeTaskCenter() {
 function switchTaskTab(tab) {
   taskCenterTab.value = tab;
   if (tab === "aa") aaCenter.value?.refresh();
-  else scheduleCenter.value?.refresh();
+  else if (tab === "schedule") scheduleCenter.value?.refresh();
+  else if (tab === "workflow") recoveryCenter.value?.refresh();
 }
 function onGlobalKeydown(event) {
   if (event.key === "Escape") closeTaskCenter();
@@ -1158,7 +1162,7 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKeydown));
           <div class="task-center-header">
             <div>
               <h2 id="task-center-title">任务中心</h2>
-              <p>查看 AA 收付款和单次定时转账</p>
+              <p>查看 AA 收付款、预约转账和历史工作流</p>
             </div>
             <button
               ref="taskCloseButton"
@@ -1189,6 +1193,15 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKeydown));
             >
               定时转账
             </button>
+            <button
+              type="button"
+              role="tab"
+              :aria-selected="taskCenterTab === 'workflow'"
+              :class="{ active: taskCenterTab === 'workflow' }"
+              @click="switchTaskTab('workflow')"
+            >
+              工作流
+            </button>
           </div>
           <div class="task-center-scroll">
             <div v-show="taskCenterTab === 'aa'" role="tabpanel">
@@ -1206,6 +1219,14 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKeydown));
                 ref="scheduleCenter"
                 embedded
                 :user-id="currentUser.userId"
+                :fetcher="req"
+              />
+            </div>
+            <div v-show="taskCenterTab === 'workflow'" role="tabpanel">
+              <WorkflowRecoveryCenter
+                :key="currentUser.userId"
+                ref="recoveryCenter"
+                :conversation-id="activeConversationId || ''"
                 :fetcher="req"
               />
             </div>
