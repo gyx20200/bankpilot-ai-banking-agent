@@ -339,6 +339,28 @@ public class ConversationService {
         return new WriteResult(created.view(), true);
     }
 
+    /**
+     * D5: verify the stored USER message before registering a workflow.
+     * Must join the caller's transaction so the conversation row stays locked
+     * until the workflow session INSERT succeeds or rolls back.
+     * No new messages are written and no bank actions are performed here.
+     */
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.MANDATORY)
+    public String requireWorkflowSource(long userId, String conversationId,
+                                        String rawRequestId, String rawContent) {
+        String id = uuid(conversationId);
+        String key = requestId(rawRequestId);
+        String content = safeMessage(rawContent);
+        requireActive(userId, id, true);
+        MessageRow original = findMessage(id, key);
+        if (original == null || !"USER".equals(original.role())
+                || !content.equals(original.content())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "Referenced user message is absent or does not match the request");
+        }
+        return id;
+    }
+
     @Transactional
     public WriteResult appendUserMessage(long userId, String conversationId,
                                          String rawContent, String rawRequestId) {

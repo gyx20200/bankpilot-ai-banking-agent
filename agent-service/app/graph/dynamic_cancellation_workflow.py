@@ -685,4 +685,13 @@ builder.add_edge('verify_cancelled', END)
 builder.add_edge('reject', 'verify_rejected')
 builder.add_edge('verify_rejected', END)
 
-dynamic_graph = builder.compile(checkpointer=InMemorySaver())
+def build_dynamic_graph(checkpointer=None):
+    """Compile the unchanged D4 graph with a caller-owned checkpointer."""
+    return builder.compile(
+        checkpointer=checkpointer if checkpointer is not None else InMemorySaver()
+    )
+
+
+# D4 imports/tests continue to use this memory-backed graph.
+# Persistent FastAPI lifespan installs a separate compiled graph.
+dynamic_graph = build_dynamic_graph()

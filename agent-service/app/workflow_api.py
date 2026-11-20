@@ -20,6 +20,10 @@ from app.assistant_history import (
 from app.context.history_client import load_planner_context
 from app.graph.dynamic_cancellation_workflow import dynamic_graph
 from app.graph.task_planner import PlannerError
+from app.checkpoint_runtime import persistent_enabled
+from app.workflow_session_client import (
+    register_session, get_session, list_sessions, update_session_status,
+)
 
 router = APIRouter(prefix='/api/agent/workflows', tags=['Dynamic Workflow'])
 
@@ -68,14 +72,55 @@ async def _authenticated_user(bearer: str | None) -> int:
     return user_id
 
 
-async def _owner(thread: str, bearer: str | None) -> dict:
+async def _owner(thread: str, bearer: str | None, *, read_only: bool = False) -> dict:
     user_id = await _authenticated_user(bearer)
+    if persistent_enabled():
+        # This call enforces user ownership in Java; never trust a browser-supplied thread ID.
+        session = await get_session(thread, bearer)
+        if session.expired:
+            raise HTTPException(410, '工作流已过期；只能查看银行原始订单。')
+        if not read_only and session.status != 'WAITING':
+            raise HTTPException(409, '当前工作流未处于可交互的等待状态。')
     rec = _sessions.get(thread)
     if not rec or rec.get('ownerUserId') != user_id:
-        raise HTTPException(403, '任务不存在或不属于当前用户。')
+        # NEVER reconstruct _sessions from a checkpoint in D5.
+        raise HTTPException(409 if persistent_enabled() else 403,
+                            '工作流不属于当前进程的可操作任务；请使用只读恢复查看，勿重复建单。')
     if datetime.now(timezone.utc) > rec['expires']:
         raise HTTPException(410, '任务已过期，请查询原银行订单状态，勿盲目重复操作。')
     return rec
+
+async def _invoke_graph(value, config, *, context):
+    options = {'context': context}
+    if persistent_enabled():
+        options['durability'] = 'sync'
+    return await dynamic_graph.ainvoke(value, config, **options)
+
+
+def _lifecycle(view: dict, paused: bool) -> str:
+    if paused:
+        return 'WAITING'
+    status = view.get('status')
+    if status in ('COMPLETED', 'REJECTED'):
+        return status
+    if status in ('UNKNOWN', 'NOT_CONFIRMED', 'INCOMPLETE'):
+        return 'NOT_CONFIRMED'
+    return 'ENDED'
+
+
+async def _sync_workflow_status(thread: str, view: dict, paused: bool,
+                                authorization: str | None) -> None:
+    if not persistent_enabled():
+        return
+    try:
+        await update_session_status(thread, _lifecycle(view, paused), authorization)
+    except HTTPException as exc:
+        # A bank side effect may already have happened. Freeze the in-memory
+        # interactive capability and require explicit read-only reconciliation.
+        _sessions.pop(thread, None)
+        _locks.pop(thread, None)
+        raise HTTPException(503,
+            f'工作流持久化状态未确认，原threadId={thread}；请查询原银行订单，勿重复发起。') from exc
 
 
 def _config(thread: str) -> dict:
@@ -166,43 +211,64 @@ async def dynamic_start(body: StartBody, authorization: str | None = Header(defa
     has_source = body.userMessageRequestId is not None
     if has_conversation != has_source:
         raise HTTPException(422, 'conversationId 与 userMessageRequestId 必须同时提供。')
+    if persistent_enabled() and not has_conversation:
+        raise HTTPException(422, '持久化模式要求会话ID和本轮USER消息requestId，禁止无归属建单。')
     thread = str(uuid4())
+
+    # Verify the D3 conversation and load its history BEFORE registering the graph.
+    planner_context = None
+    if has_conversation:
+        planner_context = await load_planner_context(
+            conversation_id=body.conversationId,
+            current_message=body.message,
+            authorization=authorization,
+        )
+
+    registered = False
+    if persistent_enabled():
+        # Java checks JWT owner, active conversation, actual USER message and
+        # unique (conversation_id, source_request_id) before ANY graph side effect.
+        # Java failure or duplicate registration prevents Graph execution.
+        await register_session(thread, str(body.conversationId),
+                               body.userMessageRequestId, body.message, authorization)
+        registered = True
+
     try:
-        # 1. 先验证用户身份
-
-        # 2. 如果提供了 conversationId，
-        #    从 Java 获取历史消息
-        planner_context = None
-
-        if body.conversationId:
-            planner_context = await load_planner_context(
-                conversation_id=body.conversationId,
-                current_message=body.message,
-                authorization=authorization,
-            )
-
-        # 3. 将 Context 传给 LangGraph
-        state = await dynamic_graph.ainvoke(
+        state = await _invoke_graph(
             {'message': body.message},
             _config(thread),
-            context={
-                'authorization': authorization,
-                'planner_context': planner_context,
-            }
+            context={'authorization': authorization,
+                     'planner_context': planner_context},
         )
-    except PlannerError as exc:
-        raise HTTPException(422, str(exc)) from exc
-    except bank.BankError as exc:
-        raise HTTPException(exc.status, str(exc)) from exc
+    except Exception as exc:
+        if registered:
+            try:
+                await update_session_status(thread, 'NOT_CONFIRMED', authorization)
+            except Exception:
+                pass  # Keep the original threadId; never retry graph execution.
+        if isinstance(exc, PlannerError):
+            raise HTTPException(422, str(exc)) from exc
+        if isinstance(exc, bank.BankError):
+            raise HTTPException(exc.status,
+                f'{exc}；原threadId={thread}，不得重复发起资金任务。') from exc
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(503,
+            f'工作流执行结果不确定，原threadId={thread}；请核对银行原订单，勿重复提交。') from exc
+
     paused = bool(state.get('__interrupt__'))
     view = _view(thread, state, paused)
+    await _sync_workflow_status(thread, view, paused, authorization)
     if paused:
-        _sessions[thread] = {'ownerUserId': owner_user_id, 'expires': datetime.now(timezone.utc) + _EXPIRY,
-                             'finished': False, 'decision': None, 'last': view}
+        _sessions[thread] = {
+            'ownerUserId': owner_user_id,
+            'expires': datetime.now(timezone.utc) + _EXPIRY,
+            'finished': False, 'decision': None, 'last': view,
+        }
         _locks[thread] = asyncio.Lock()
 
-    # Saving the reply is a HISTORY operation, not a banking action. Never
-    # execute the Graph again if this write times out or Java is unavailable.
+    # Reply text is persisted by Java independently. Never rerun the graph just
+    # because assistant history failed or timed out.
     reply = assistant_reply_text(view)
     view['assistantReply'] = reply
     if has_conversation:
@@ -216,14 +282,13 @@ async def dynamic_start(body: StartBody, authorization: str | None = Header(defa
             )
             view['assistantPersisted'] = True
         except AssistantHistoryError as exc:
-            print(f"[D3 AssistantHistory] {exc}", flush=True)
+            print(f'[D3 AssistantHistory] {exc}', flush=True)
             view['assistantPersisted'] = False
             view['assistantHistoryWarning'] = (
                 '助手回复未确认写入历史。请核对当前会话记录；'
                 '不要为了保存回复而重复发送转账或审批指令。'
             )
     else:
-        # Backward compatibility for existing workflow API callers.
         view['assistantPersisted'] = False
     return view
 
@@ -251,7 +316,7 @@ def _bank_verified_user_rejection(snapshot, state: dict, order: dict) -> bool:
 
 @router.get('/dynamic/{thread_id}')
 async def dynamic_status(thread_id: str, authorization: str | None = Header(default=None)):
-    record = await _owner(thread_id, authorization)
+    record = await _owner(thread_id, authorization, read_only=True)
     if record['finished']:
         return record['last']
     # Read-only recovery: never calls a bank write endpoint.
@@ -299,6 +364,76 @@ async def dynamic_status(thread_id: str, authorization: str | None = Header(defa
     return view
 
 
+@router.get('/sessions')
+async def workflow_sessions(conversationId: UUID,
+                            authorization: str | None = Header(default=None)):
+    await _authenticated_user(authorization)
+    if not persistent_enabled():
+        raise HTTPException(409, '当前未启用持久化 Checkpoint。')
+    rows = await list_sessions(str(conversationId), authorization)
+    return {'conversationId': str(conversationId), 'items': [
+        {**item.model_dump(mode='json'), 'expired': item.expired}
+        for item in rows
+    ]}
+
+
+@router.get('/dynamic/{thread_id}/recovery')
+async def workflow_recovery(thread_id: UUID,
+                            authorization: str | None = Header(default=None)):
+    await _authenticated_user(authorization)
+    if not persistent_enabled():
+        raise HTTPException(409, '当前未启用持久化 Checkpoint。')
+    thread = str(thread_id)
+    # Java performs owner + session checks; never read SQLite first.
+    rec = await get_session(thread, authorization)
+    snap = await dynamic_graph.aget_state(_config(thread))
+    state = snap.values or {}
+    found = bool(state or snap.next or snap.tasks)
+    paused = bool(_pending(snap)) if found else False
+    order_id = None
+    bank_status = 'UNKNOWN'
+    if found:
+        try:
+            if state.get('transferOrder'):
+                order_id = str(state['transferOrder']['orderId'])
+                remote = await bank.get_order(order_id, authorization)
+                _read_bank_order_matches(state, remote)
+                bank_status = remote['status']
+            elif state.get('scheduledDraft'):
+                order_id = str(state['scheduledDraft']['scheduleId'])
+                remote = await bank.scheduled_get(order_id, authorization)
+                _check_scheduled(state, remote)
+                bank_status = remote['status']
+            elif state.get('aaDraft'):
+                order_id = str(state['aaDraft']['collectionId'])
+                remote = await bank.aa_get(order_id, authorization)
+                if not _aa_draft_matches(state['aaDraft'], remote):
+                    raise ValueError('AA draft mismatch')
+                bank_status = remote['status']
+            elif state.get('cancellationOrder'):
+                order_id = str(state['cancellationOrder']['orderId'])
+                remote = await bank.get_subscription_cancellation(order_id, authorization)
+                if (str(remote.get('orderId')) != order_id
+                        or remote.get('subscriptionId') != (state.get('candidate') or {}).get('id')):
+                    raise ValueError('subscription order mismatch')
+                bank_status = remote['status']
+        except (bank.BankError, HTTPException, KeyError, ValueError, TypeError):
+            bank_status = 'UNKNOWN'
+    return {
+        'threadId': thread,
+        'conversationId': str(rec.conversationId),
+        'checkpointFound': found,
+        'nextNodes': list(snap.next or ())[:20] if found else [],
+        'status': _view(thread, state, paused)['status'] if found else 'UNKNOWN',
+        'lifecycleStatus': rec.status,
+        'orderId': order_id,
+        'bankOrderStatus': bank_status,
+        'expired': rec.expired,
+        'readOnly': True,
+        'canResume': False,
+    }
+
+
 @router.post('/dynamic/recipient/select')
 async def select_recipient(body: RecipientSelectBody,
                            authorization: str | None = Header(default=None)):
@@ -316,7 +451,7 @@ async def select_recipient(body: RecipientSelectBody,
         if not any(item.get('recipientId') == body.recipientId for item in choices):
             raise HTTPException(422, '选择不属于银行返回的候选收款人。')
         try:
-            result = await dynamic_graph.ainvoke(Command(resume=body.recipientId), config,
+            result = await _invoke_graph(Command(resume=body.recipientId), config,
                          context={'authorization': authorization})
         except bank.BankError as exc:
             raise HTTPException(exc.status, str(exc)) from exc
@@ -325,6 +460,7 @@ async def select_recipient(body: RecipientSelectBody,
         if not paused and result.get('status') not in ('COMPLETED', 'REJECTED'):
             # Do not create a fresh order after uncertain bank-side effects.
             raise HTTPException(409, '收款人选择未进入审批状态，请刷新原线程核查。')
+        await _sync_workflow_status(body.threadId, view, paused, authorization)
         if not paused:
             record.update(finished=True, last=view)
         return view
@@ -341,11 +477,12 @@ async def cancel_recipient_selection(body: ThreadBody,
         snap = await dynamic_graph.aget_state(config)
         if _pending(snap) != 'recipient':
             raise HTTPException(409, '当前没有等待选择的收款人。')
-        result = await dynamic_graph.ainvoke(Command(resume=False), config,
+        result = await _invoke_graph(Command(resume=False), config,
                           context={'authorization': authorization})
         if result.get('__interrupt__') or result.get('status') != 'REJECTED' or result.get('transferOrder'):
             raise HTTPException(409, '无法确认已退出收款人选择，请查询原任务状态。')
         view = _view(body.threadId, result)
+        await _sync_workflow_status(body.threadId, view, False, authorization)
         record.update(finished=True, decision=False, last=view)
         return view
 
@@ -486,7 +623,7 @@ async def dynamic_resume(body: DecisionBody, authorization: str | None = Header(
             raise HTTPException(409, '任务没有等待审批，或审批决定已经改变。')
 
         try:
-            result = await dynamic_graph.ainvoke(command, config,
+            result = await _invoke_graph(command, config,
                           context={'authorization': authorization,
                                    'transferOtpCode': body.otpCode if body.approved else None})
         except bank.BankError as exc:
@@ -496,5 +633,6 @@ async def dynamic_resume(body: DecisionBody, authorization: str | None = Header(
         if result.get('status') not in ('COMPLETED', 'REJECTED'):
             raise HTTPException(409, result.get('details') or '银行未确认最终业务状态。')
         view = _view(body.threadId, result)
+        await _sync_workflow_status(body.threadId, view, False, authorization)
         record.update(finished=True, decision=body.approved, last=view)
         return view
