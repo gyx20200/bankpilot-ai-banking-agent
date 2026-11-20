@@ -17,12 +17,13 @@ from app import llm_router
 from app.transfer_parser import parse_transfer, normalize_amount
 from app import banking_client as bank
 from app.workflow_api import router as workflow_router
+from app.checkpoint_runtime import checkpoint_lifespan
 from app.auth_api import router as auth_router
 from app.aa_api import router as aa_router
 from app.schedule_api import router as schedule_router
 from datetime import datetime, timedelta, timezone
 
-app = FastAPI(title="BankPilot Agent Day 6", version="0.6.0")
+app = FastAPI(title="BankPilot Agent Day 6", version="0.6.0", lifespan=checkpoint_lifespan)
 app.include_router(workflow_router)
 app.include_router(auth_router)
 app.include_router(conversation_router)
@@ -101,7 +102,8 @@ def _response(action, payload, reply, request_id):
 async def health():
     return {"status": "ok", "mode": "llm-day5" if llm_router.enabled() else "rules-day5",
             "bankMode": bank.BANK_MODE, "modelConfigured": llm_router.configured() if llm_router.enabled() else False,
-            "modelName": llm_router.model_name()}
+            "modelName": llm_router.model_name(),
+            "checkpointMode": getattr(app.state, "checkpoint_mode", "memory")}
 def invalid_calendar_month(message: str) -> int | None:
     """检查月度查询中是否包含明确不合法的月份。"""
 
