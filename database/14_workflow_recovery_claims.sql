@@ -17,3 +17,7 @@ CREATE TABLE IF NOT EXISTS agent_workflow_recovery_claims (
         (status IN ('CLAIMED','COMPLETED','REJECTED','NOT_CONFIRMED')),
     KEY idx_recovery_owner (user_id,created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+GRANT SELECT, INSERT, UPDATE
+ON bankpilot_day7_test.agent_workflow_recovery_claims
+TO 'bankpilot_app'@'localhost';
