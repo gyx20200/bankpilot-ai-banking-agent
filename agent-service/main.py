@@ -22,9 +22,11 @@ from app.auth_api import router as auth_router
 from app.aa_api import router as aa_router
 from app.schedule_api import router as schedule_router
 from datetime import datetime, timedelta, timezone
+from app.d6_recovery_api import router as d6_recovery_router
 
 app = FastAPI(title="BankPilot Agent Day 6", version="0.6.0", lifespan=checkpoint_lifespan)
 app.include_router(workflow_router)
+app.include_router(d6_recovery_router)
 app.include_router(auth_router)
 app.include_router(conversation_router)
 app.include_router(aa_router)
