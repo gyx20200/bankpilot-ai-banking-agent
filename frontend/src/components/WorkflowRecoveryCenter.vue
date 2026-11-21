@@ -1,7 +1,7 @@
 <script setup>
 import { ref, watch } from 'vue'
+import RecoveredTransferApproval from './RecoveredTransferApproval.vue'
 
-// Deliberately read-only: never call /dynamic/resume, /authorize or OTP endpoints.
 const props = defineProps({
   conversationId: { type: String, default: '' },
   fetcher: { type: Function, required: true },
@@ -61,6 +61,7 @@ async function inspect(threadId) {
       'GET', undefined, 12000,
     )
     if (revision !== version) return
+    // D5 read-only inspection remains intentionally unchanged.
     if (data.threadId !== threadId || data.canResume !== false || data.readOnly !== true) {
       throw new Error('恢复接口未返回受保护的只读结果')
     }
@@ -71,6 +72,7 @@ async function inspect(threadId) {
     if (revision === version) busy.value = false
   }
 }
+
 watch(() => props.conversationId, reset)
 defineExpose({ refresh, reset })
 </script>
@@ -78,7 +80,7 @@ defineExpose({ refresh, reset })
 <template>
   <section class="d5-recovery" aria-label="历史智能工作流">
     <header>
-      <div><strong>工作流检查点</strong><p>当前会话 · 服务重启后只读查看</p></div>
+      <div><strong>工作流检查点</strong><p>当前会话 · 重启后只读核对及安全续接</p></div>
       <button type="button" :disabled="busy || !conversationId" @click="refresh">刷新</button>
     </header>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
@@ -94,12 +96,18 @@ defineExpose({ refresh, reset })
     <section v-if="selected" class="inspection" aria-label="原工作流检查结果">
       <div class="row"><strong>恢复检查</strong><span>{{ selected.checkpointFound ? '已找到检查点' : '无检查点' }}</span></div>
       <p>原 threadId：<span class="id">{{ selected.threadId }}</span></p>
-      <p>原 orderId：{{ selected.orderId || '当前线程无转账订单' }}</p>
+      <p>原 orderId：{{ selected.orderId || '当前线程没有银行订单' }}</p>
       <p>检查点状态：{{ selected.status }}</p>
       <p>银行订单实时状态：{{ selected.bankOrderStatus || 'UNKNOWN' }}</p>
       <p>待执行节点：{{ (selected.nextNodes || []).join('、') || '无' }}</p>
-      <p class="muted">已过期：{{ selected.expired ? '是' : '否' }} · 仅只读查看</p>
-      <p class="warning">D5 不提供继续审批或 OTP 操作。银行业务恢复需在 D6 完成额外核验。</p>
+      <p class="muted">已过期：{{ selected.expired ? '是' : '否' }} · 本区只读查看</p>
+      <p class="warning">D5 检查点本身不会执行银行操作。D6 仅允许经额外核验的模拟转账人工审批恢复。</p>
+      <RecoveredTransferApproval
+        v-if="selectedThread && selected.checkpointFound && !selected.expired && selected.status === 'WAITING_TRANSFER_APPROVAL'"
+        :key="selectedThread"
+        :thread-id="selectedThread"
+        :fetcher="fetcher"
+      />
     </section>
   </section>
 </template>
