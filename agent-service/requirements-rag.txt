@@ -1,0 +1,4 @@
+# D8 optional public-knowledge retrieval stack; installed only on Agent/Python host.
+# Verify platform wheels and resolved versions on Windows before committing lock constraints.
+chromadb>=1.2,<2
+sentence-transformers>=3,<6

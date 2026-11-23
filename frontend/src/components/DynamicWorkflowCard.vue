@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import MonthlyAnalyticsCard from './MonthlyAnalyticsCard.vue'
 import AnnualAnalyticsCard from './AnnualAnalyticsCard.vue'
 import TransactionAnomalyCard from './TransactionAnomalyCard.vue'
+import KnowledgeEvidenceCard from './KnowledgeEvidenceCard.vue'
 
 const props = defineProps({
   task: { type: Object, required: true },
@@ -39,6 +40,13 @@ const annual = computed(() =>
     ? results.value.annual_analytics.data
     : null
 )
+const knowledge = computed(() => {
+  const item = results.value.knowledge_search
+
+  return item?.status === 'SUCCESS'
+      ? item.data
+      : null
+})
 
 const anomalies = computed(() =>
   results.value.transaction_anomalies?.status === 'SUCCESS'
@@ -46,6 +54,10 @@ const anomalies = computed(() =>
     : null
 )
 const requested = computed(() => new Set(planTasks.value.map(t => t.type)))
+const showKnowledge = computed(() =>
+    knowledge.value?.dataOrigin === 'PUBLIC_OFFICIAL'
+    && requested.value.has('knowledge_search')
+)
 const showBalance = computed(() => balance.value && requested.value.has('get_balance'))
 const showTransactions = computed(() => transactions.value && requested.value.has('get_transactions'))
 const showPayees = computed(() => payees.value && requested.value.has('get_payees'))
@@ -64,7 +76,8 @@ const hasVisibleRead = computed(() =>
   showSubscriptions.value ||
   showMonthly.value ||
   showAnnual.value ||
-  showAnomalies.value
+  showAnomalies.value ||
+showKnowledge.value
 )
 const readCount = computed(() =>
   [
@@ -75,6 +88,7 @@ const readCount = computed(() =>
     showMonthly,
     showAnnual,
     showAnomalies,
+    showKnowledge,
   ].filter(flag => Boolean(flag.value)).length
 )
 const technicalOpen = ref(false)
@@ -87,7 +101,7 @@ const taskNames = {
   monthly_analytics: '月度收支分析', list_subscriptions: '查询代扣订阅',
   transfer_prepare: '模拟转账', cancel_subscription: '取消代扣',
   create_aa_collection: 'AA收款', schedule_transfer: '定时转账', annual_analytics: '年度收支分析',
-  transaction_anomalies: '异常交易检测',
+  transaction_anomalies: '异常交易检测',knowledge_search: '公开金融知识问答',
 }
 const states = {
   COMPLETED: '任务完成', REJECTED: '用户已拒绝', NOT_CONFIRMED: '银行结果待核查',
@@ -196,7 +210,10 @@ function reject(kind) {
     <MonthlyAnalyticsCard v-if="showMonthly" :data="monthly" />
     <AnnualAnalyticsCard v-if="showAnnual" :data="annual" />
     <TransactionAnomalyCard v-if="showAnomalies" :data="anomalies" />
-
+    <KnowledgeEvidenceCard
+        v-if="showKnowledge"
+        :data="knowledge"
+    />
     <div v-if="choosingRecipient" class="result-card recipient-picker" aria-label="选择重名收款人">
       <div class="result-title"><span class="result-glyph blue" aria-hidden="true">◎</span><div><strong>请选择正确的收款人</strong><small>同名用户需要人工选择；目前未创建转账订单</small></div></div>
       <p class="recipient-tip">下列候选信息来自银行目录。请选择对应的脱敏账号，避免转给同名的其他人。</p>
