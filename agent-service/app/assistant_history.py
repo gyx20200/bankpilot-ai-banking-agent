@@ -80,6 +80,7 @@ def assistant_reply_text(view: dict) -> str:
             if item.get("status") == "SUCCESS" and isinstance(item.get("data"), list):
                 notes.append(f"已查询{len(item['data'])}条{label}记录")
 
+
         knowledge = reads.get("knowledge_search", {})
         has_public_knowledge = False
 
@@ -102,7 +103,8 @@ def assistant_reply_text(view: dict) -> str:
                         "公开金融知识检索证据不足，"
                         "无法给出确定结论"
                     )
-                if notes:
+
+        if notes:
             if has_public_knowledge:
                 return (
                         "；".join(notes)
@@ -115,6 +117,12 @@ def assistant_reply_text(view: dict) -> str:
                     + "。以上为当时的模拟银行查询结果，"
                       "最新状态请重新查询。"
             )
+
+        return (
+            "任务已完成。"
+            "业务状态以 Java 银行接口返回的结果为准。"
+        )
+
     messages = {
         "WAITING_RECIPIENT_SELECTION": "已找到多个候选收款人，需要您明确选择；尚未创建转账订单。",
         "WAITING_TRANSFER_APPROVAL": "模拟转账订单当时进入待审批状态；当前状态请查询原银行订单。",
