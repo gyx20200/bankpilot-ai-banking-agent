@@ -1,0 +1,56 @@
+[
+  {
+    "source_id": "MOJ_DEPOSIT_INSURANCE_2015",
+    "title": "存款保险条例（国务院令第660号）",
+    "issuer": "中华人民共和国司法部·国家行政法规库",
+    "url": "https://xzfg.moj.gov.cn/front/law/detail?LawID=419",
+    "published_at": "2015-02-17",
+    "checked_at": "2026-11-23",
+    "scope": "PUBLIC_OFFICIAL",
+    "category": "deposit_insurance",
+    "sections": [
+      {"section": "第四条", "text": "《存款保险条例》规定，被保险存款包括投保机构吸收的人民币存款和外币存款；规定了金融机构同业存款等不予保险的例外情形。这里描述的是公开法律规则，不代表 BankPilot 模拟银行实际投保情况。"},
+      {"section": "第五条", "text": "《存款保险条例》规定最高偿付限额为人民币50万元，同一存款人在同一家投保机构的被保险存款账户本金与利息合并计算，限额以内实行全额偿付；超出限额部分依法从投保机构清算财产中受偿。"}
+    ]
+  },
+  {
+    "source_id": "PBC_DEPOSIT_RESPONSE_2025",
+    "title": "人民银行回应：存款保险条例修改了保障额度吗？",
+    "issuer": "中国人民银行互动交流平台",
+    "url": "https://wzdt.pbc.gov.cn/eportal/ui?msgDataId=d3f5c72a0157407e97b4998676c34ef2&pageId=77c3557bd521439ea5cd869f5393ba98",
+    "published_at": "2025-09-02",
+    "checked_at": "2026-11-23",
+    "scope": "PUBLIC_OFFICIAL",
+    "category": "deposit_insurance",
+    "sections": [
+      {"section": "公开答复", "text": "中国人民银行于2025年9月2日答复关于存款保险保障额度调整的提问，表示当时适用的仍是2015年5月1日起施行的《存款保险条例》，最高偿付限额仍为人民币50万元，未采纳流传的降至30万元说法。法规与政策可能更新，查询时应再次确认来源日期。"}
+    ]
+  },
+  {
+    "source_id": "PBCCRC_CREDIT_QUERY_2024",
+    "title": "个人征信查询服务指南",
+    "issuer": "中国人民银行征信中心",
+    "url": "https://www.pbccrc.org.cn/zxfw/gr/cx/20241029/6bb3ada5b92641779ee33e06c30f1e4c.html",
+    "published_at": "2024-10-29",
+    "checked_at": "2026-11-23",
+    "scope": "PUBLIC_OFFICIAL",
+    "category": "credit_report",
+    "sections": [
+      {"section": "查询渠道", "text": "征信中心介绍，个人信用报告可通过征信中心官方渠道，以及获授权的商业银行网银、手机银行应用、智慧柜员机和中国银联云闪付等渠道申请查询。应避免未经授权的第三方查询渠道，以降低个人信息泄露与欺诈风险。"}
+    ]
+  },
+  {
+    "source_id": "MOJ_FINANCIAL_CONSUMER_2020",
+    "title": "中国人民银行金融消费者权益保护实施办法",
+    "issuer": "中华人民共和国司法部",
+    "url": "https://www.moj.gov.cn/pub/sfbgw/flfggz/flfggzbmgz/202101/t20210104_146543.html",
+    "published_at": "2020-09-15",
+    "checked_at": "2026-11-23",
+    "scope": "PUBLIC_OFFICIAL",
+    "category": "consumer_protection",
+    "sections": [
+      {"section": "消费者信息保护", "text": "《中国人民银行金融消费者权益保护实施办法》对银行、支付机构收集、使用和保护消费者金融信息提出要求，强调依法告知信息收集使用的规则、目的、方式和范围，以及保护金融消费者信息安全。"},
+      {"section": "信息披露与争议", "text": "金融消费者权益保护制度要求金融服务信息披露与公平处理消费者争议。公开规则说明不能替代具体金融机构的产品合同、实时费用、账户处理结果或个案法律意见。"}
+    ]
+  }
+]
