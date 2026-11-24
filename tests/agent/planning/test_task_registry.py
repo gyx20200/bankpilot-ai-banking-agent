@@ -17,6 +17,7 @@ def test_all_existing_business_tasks_are_registered():
         "cancel_subscription",
         "create_aa_collection",
         "schedule_transfer",
+        "knowledge_search",
     }
 
 

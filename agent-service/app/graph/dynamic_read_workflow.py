@@ -8,7 +8,7 @@ from langgraph.types import Send
 from app import banking_client as bank
 from app.graph.task_planner import plan_tasks
 from app.graph.task_registry import TASK_REGISTRY
-
+from app.rag.answer import answer_public_question
 
 class Context(TypedDict):
     authorization: str
@@ -29,10 +29,16 @@ READ_EXECUTORS = {
     'subscriptions': bank.subscriptions,
 }
 READ_TASK_TYPES = frozenset(
-    task_type for task_type, spec in TASK_REGISTRY.items()
-    if spec.risk_level == 'LOW' and (
-        spec.executor_key in READ_EXECUTORS or spec.executor_key in {
-            'monthly_analytics', 'annual_analytics', 'transaction_anomalies'
+    task_type
+    for task_type, spec in TASK_REGISTRY.items()
+    if spec.risk_level == 'LOW'
+    and (
+        spec.executor_key in READ_EXECUTORS
+        or spec.executor_key in {
+            'monthly_analytics',
+            'annual_analytics',
+            'transaction_anomalies',
+            'knowledge_search',
         }
     )
 )
@@ -61,25 +67,65 @@ def schedule_reads(state: State):
     return [Send('execute_read', {'task': item}) for item in state['plan']['tasks']]
 
 
-async def execute_read(state: dict, runtime: Runtime[Context]) -> dict:
-    task = state['task']
-    task_type = task['type']
+
+async def execute_read(
+        state: dict,
+        runtime: Runtime[Context],
+) -> dict:
+
+    task = state["task"]
+    task_type = task["type"]
+
     if task_type not in READ_TASK_TYPES:
-        raise ValueError('未授权的只读任务类型。')
+        raise ValueError("未授权的只读任务类型。")
+
     spec = TASK_REGISTRY[task_type]
-    bearer = runtime.context['authorization']
-    if task_type == 'monthly_analytics':
-        data = await bank.get_monthly_analytics(task['month'], bearer)
-    elif task_type == 'annual_analytics':
-        data = await bank.get_annual_analytics(task['year'], bearer)
-    elif task_type == 'transaction_anomalies':
-        data = await bank.get_transaction_anomalies(task['month'], bearer)
+    bearer = runtime.context["authorization"]
+
+    if task_type == "knowledge_search":
+        data = await answer_public_question(
+            task["query"]
+        )
+
+    elif task_type == "monthly_analytics":
+        data = await bank.get_monthly_analytics(
+            task["month"],
+            bearer,
+        )
+
+    elif task_type == "annual_analytics":
+        data = await bank.get_annual_analytics(
+            task["year"],
+            bearer,
+        )
+
+    elif task_type == "transaction_anomalies":
+        data = await bank.get_transaction_anomalies(
+            task["month"],
+            bearer,
+        )
+
     else:
-        handler = READ_EXECUTORS.get(spec.executor_key)
+        handler = READ_EXECUTORS.get(
+            spec.executor_key
+        )
+
         if handler is None:
-            raise ValueError(f'未找到任务 {task_type} 的受控只读执行器。')
+            raise ValueError(
+                f"未找到任务 {task_type} 的受控只读执行器。"
+            )
+
         data = await handler(bearer)
-    return {'results': {task_type: {'status': 'SUCCESS', 'data': data}}}
+
+    return {
+        "results": {
+            task_type: {
+                "status": "SUCCESS",
+                "data": data,
+            }
+        }
+    }
+
 
 
 def finish(state: State) -> dict:

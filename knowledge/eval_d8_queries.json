@@ -1,0 +1,6 @@
+[
+ {"query":"存款保险最高偿付限额是多少？","expected_source_id":"MOJ_DEPOSIT_INSURANCE_2015","answer_contains":"50万"},
+ {"query":"存款保险原来50万是不是调低到30万了？","expected_source_id":"PBC_DEPOSIT_RESPONSE_2025","answer_contains":"50万"},
+ {"query":"征信报告可以通过哪些正规渠道查询？","expected_source_id":"PBCCRC_CREDIT_QUERY_2024","answer_contains":"征信"},
+ {"query":"银行处理消费者金融信息要注意什么？","expected_source_id":"MOJ_FINANCIAL_CONSUMER_2020","answer_contains":"信息"}
+]

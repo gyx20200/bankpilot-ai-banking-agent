@@ -14,6 +14,10 @@ from app import banking_client as bank
 
 
 def _load_workflow_api(monkeypatch):
+    # This isolated DummyGraph test verifies identity guards,
+    # not persistent checkpoint registration.
+    monkeypatch.setenv("BANKPILOT_CHECKPOINT_MODE", "memory")
+
     # isolate native LangGraph imports; test only the changed HTTP owner checks
     stub_langgraph = types.ModuleType('langgraph')
     stub_types = types.ModuleType('langgraph.types')
