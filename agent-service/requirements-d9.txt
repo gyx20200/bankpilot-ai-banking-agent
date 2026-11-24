@@ -1,0 +1,3 @@
+# Install D8 requirements-rag.txt first; CrossEncoder uses sentence-transformers.
+# No new PyPI requirement is necessary for D9.
+-r requirements-rag.txt
