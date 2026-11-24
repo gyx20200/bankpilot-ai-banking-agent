@@ -66,3 +66,67 @@ def test_supported_number_retains_server_citation(monkeypatch):
     assert result['citations'][0]['url'] == HIT['url']
     assert result['quality']['semanticFaithfulnessVerified'] is False
     assert len(result['traceId']) == 32
+
+
+def test_no_evidence_has_explanation(monkeypatch):
+    monkeypatch.setattr(
+        d9,
+        "search",
+        lambda *args, **kwargs: [],
+    )
+
+    result = asyncio.run(
+        d9.answer_public_question(
+            "公开金融制度中如何保护消费者信息？"
+        )
+    )
+
+    assert result["grounded"] is False
+    assert result["citations"] == []
+    assert result["quality"]["reasonCode"] == "NO_EVIDENCE"
+    assert "没有找到足够相关的证据" in result["answer"]
+
+
+def test_bankpilot_insurance_status_never_inferred_from_law(
+    monkeypatch,
+):
+    _mock_answer(
+        monkeypatch,
+        "存款保险条例规定投保机构应当参加存款保险。",
+    )
+
+    result = asyncio.run(
+        d9.answer_public_question(
+            "BankPilot模拟银行已经加入存款保险了吗？"
+        )
+    )
+
+    assert result["grounded"] is False
+    assert result["citations"] == []
+    assert result["quality"]["reasonCode"] == (
+        "INSTITUTION_STATUS_UNVERIFIED"
+    )
+    assert "无法确认" in result["answer"]
+    assert "机构级证据" in result["answer"]
+
+
+def test_unsupported_numeric_fact_still_blocked(
+    monkeypatch,
+):
+    _mock_answer(
+        monkeypatch,
+        "最高偿付限额已经变成60万元。",
+    )
+
+    result = asyncio.run(
+        d9.answer_public_question(
+            "存款保险最高偿付限额是多少？"
+        )
+    )
+
+    assert result["grounded"] is False
+    assert result["citations"] == []
+    assert result["quality"]["reasonCode"] == (
+        "UNSUPPORTED_NUMERIC_FACT"
+    )
+    assert "数字" in result["answer"]
