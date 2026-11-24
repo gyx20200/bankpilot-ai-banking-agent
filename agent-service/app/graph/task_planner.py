@@ -565,6 +565,13 @@ async def plan_tasks(message: str, planner_context: PlannerContext | None = None
         "用户询问存款保险、征信报告正规查询渠道、"
         "金融消费者权益保护等公开金融制度时，"
         "应规划 knowledge_search 任务。"
+        "对于 BankPilot 模拟银行是否已经加入存款保险、"
+        "是否获得监管许可、是否保证收益等问题，"
+        "也应规划 knowledge_search 任务，"
+        "由后续知识检索和证据校验判断。"
+        "不得把一般存款保险法规视为 BankPilot 实际投保的证明。"
+        "即使认为问题无法直接回答，也必须提交 submit_task_plan，"
+        "不得直接输出普通聊天回答。"
         "query 必须是当前用户原话中的连续文本片段。"
 
         "涉及个人账户余额、交易流水、转账、"
@@ -598,7 +605,25 @@ async def plan_tasks(message: str, planner_context: PlannerContext | None = None
                 json=body,
             )
             response.raise_for_status()
-            calls = response.json()["choices"][0]["message"].get("tool_calls") or []
+
+            choice = response.json()["choices"][0]
+            model_message = choice.get("message") or {}
+            calls = model_message.get("tool_calls") or []
+
+            import logging
+
+            logging.getLogger("bankpilot.planner").warning(
+                "PLANNER_RESULT finishReason=%s toolCallCount=%s "
+                "toolNames=%s contentPresent=%s",
+                choice.get("finish_reason"),
+                len(calls),
+                [
+                    call.get("function", {}).get("name")
+                    for call in calls
+               ],
+                bool(model_message.get("content")),
+            )
+
             if len(calls) != 1 or calls[0]["function"]["name"] != "submit_task_plan":
                 raise PlannerError("模型未返回可用的任务计划。")
             raw = json.loads(calls[0]["function"]["arguments"])

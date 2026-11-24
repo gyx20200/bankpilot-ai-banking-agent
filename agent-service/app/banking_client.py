@@ -63,8 +63,43 @@ async def _request(method: str, url: str, bearer: str | None = None, data: dict 
 
 
 async def balance(bearer: str | None):
-    value = await _request("GET", f"{READ_URL}/balance", bearer)
-    if not isinstance(value, dict) or "balance" not in value: raise BankError("余额数据格式不正确。")
+    import logging
+
+    logger = logging.getLogger("bankpilot.balance")
+    url = f"{READ_URL}/balance"
+
+    logger.warning(
+        "BALANCE_CALL_START url_path=%s",
+        httpx.URL(url).path
+    )
+
+    try:
+        value = await _request("GET", url, bearer)
+
+    except BankError as exc:
+        cause = exc.__cause__
+
+        if isinstance(cause, httpx.HTTPStatusError):
+            logger.warning(
+                "BALANCE_UPSTREAM_ERROR status=%s path=%s",
+                cause.response.status_code,
+                cause.request.url.path
+            )
+        else:
+            logger.warning(
+                "BALANCE_CLIENT_ERROR status=%s cause=%s",
+                exc.status,
+                type(cause).__name__ if cause else "None"
+            )
+
+        raise
+
+    if not isinstance(value, dict) or "balance" not in value:
+        logger.warning("BALANCE_INVALID_RESPONSE")
+        raise BankError("余额数据格式不正确。")
+
+    logger.warning("BALANCE_CALL_SUCCESS")
+
     return value
 
 

@@ -1,0 +1,34 @@
+{
+  "version": "d9-v1",
+  "note": "人工复核的模拟评测集。expectedSourceIds 为允许的来源集合，指标随索引版本变化。",
+  "retrievalCases": [
+    {"id":"R01","query":"存款保险最高偿付限额是多少？","expectedSourceIds":["MOJ_DEPOSIT_INSURANCE_2015"]},
+    {"id":"R02","query":"同一个人在同一家投保机构的存款利息是否一起计入保障额度？","expectedSourceIds":["MOJ_DEPOSIT_INSURANCE_2015"]},
+    {"id":"R03","query":"存款保险最高限额是否调整成了30万元？","expectedSourceIds":["PBC_DEPOSIT_RESPONSE_2025"]},
+    {"id":"R04","query":"2025年9月央行对存款保险额度调整作何答复？","expectedSourceIds":["PBC_DEPOSIT_RESPONSE_2025"]},
+    {"id":"R05","query":"怎样通过官方渠道查询个人信用报告？","expectedSourceIds":["PBCCRC_CREDIT_QUERY_2024"]},
+    {"id":"R06","query":"云闪付是否属于征信中心介绍的信用报告查询渠道？","expectedSourceIds":["PBCCRC_CREDIT_QUERY_2024"]},
+    {"id":"R07","query":"银行收集个人金融信息需要说明什么？","expectedSourceIds":["MOJ_FINANCIAL_CONSUMER_2020"]},
+    {"id":"R08","query":"金融消费者信息安全和信息披露有什么要求？","expectedSourceIds":["MOJ_FINANCIAL_CONSUMER_2020"]},
+    {"id":"R09","query":"人民币以外的外币存款是否在存款保险规则范围内？","expectedSourceIds":["MOJ_DEPOSIT_INSURANCE_2015"]},
+    {"id":"R10","query":"如何避免通过不明第三方查询个人征信而泄露信息？","expectedSourceIds":["PBCCRC_CREDIT_QUERY_2024"]}
+  ],
+  "routeCases": [
+    {"id":"T01","message":"我的余额还有多少？","expectedTaskTypes":["get_balance"]},
+    {"id":"T02","message":"存款保险最高偿付限额是多少？","expectedTaskTypes":["knowledge_search"]},
+    {"id":"T03","message":"查询我的余额，并且存款保险最高偿付限额是多少？","expectedTaskTypes":["get_balance","knowledge_search"]},
+    {"id":"T04","message":"分析2026年9月收支","expectedTaskTypes":["monthly_analytics"]},
+    {"id":"T05","message":"个人征信报告可以通过哪些正规渠道查询？","expectedTaskTypes":["knowledge_search"]},
+    {"id":"T06","message":"查询我的最近交易流水","expectedTaskTypes":["get_transactions"]},
+    {"id":"T07","message":"查2026年年度收支与月度趋势","expectedTaskTypes":["annual_analytics"]},
+    {"id":"T08","message":"检查2026年10月有无大额或重复扣费","expectedTaskTypes":["transaction_anomalies"]}
+  ],
+  "faithfulnessCases": [
+    {"id":"F01","answer":"存款保险最高偿付限额为50万元。","snippets":["最高偿付限额为人民币50万元。"],"expectedPassed":true},
+    {"id":"F02","answer":"最高偿付限额为60万元。","snippets":["最高偿付限额为人民币50万元。"],"expectedPassed":false},
+    {"id":"F03","answer":"BankPilot已经投保，所有存款都有保障。","snippets":["《存款保险条例》规定最高偿付限额为人民币50万元。"],"expectedPassed":false},
+    {"id":"F04","answer":"消费者金融信息的收集应依法告知规则、目的、方式和范围。","snippets":["应依法告知金融信息收集使用的规则、目的、方式和范围。"],"expectedPassed":true},
+    {"id":"F05","answer":"详情见 https://fake.example/rule","snippets":["最高偿付限额为人民币50万元。"],"expectedPassed":false},
+    {"id":"F06","answer":"征信中心介绍可以通过正规渠道查询个人信用报告。","snippets":["个人信用报告可通过征信中心官方渠道以及获授权的商业银行渠道查询。"],"expectedPassed":true}
+  ]
+}

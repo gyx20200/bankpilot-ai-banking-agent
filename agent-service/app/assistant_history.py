@@ -93,16 +93,23 @@ def assistant_reply_text(view: dict) -> str:
             ):
                 has_public_knowledge = True
 
-                if data.get("grounded") is True:
+
+                answer_text = data.get("answer")
+
+                if (
+                    isinstance(answer_text, str)
+                    and answer_text.strip()
+                ):
                     notes.append(
                         "公开金融资料答复："
-                        + str(data.get("answer", ""))[:350]
+                        + answer_text.strip()[:350]
                     )
                 else:
                     notes.append(
-                        "公开金融知识检索证据不足，"
-                        "无法给出确定结论"
+                        "公开金融资料尚未形成可核实的答案，"
+                        "请核对相关官方来源"
                     )
+
 
         if notes:
             if has_public_knowledge:
