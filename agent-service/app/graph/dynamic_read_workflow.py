@@ -29,14 +29,17 @@ READ_EXECUTORS = {
     'subscriptions': bank.subscriptions,
 }
 READ_TASK_TYPES = frozenset(
-    task_type for task_type, spec in TASK_REGISTRY.items()
-    if spec.risk_level == 'LOW' and (
-            spec.executor_key in {
-        'monthly_analytics',
-        'annual_analytics',
-        'transaction_anomalies',
-        'knowledge_search',
-    }
+    task_type
+    for task_type, spec in TASK_REGISTRY.items()
+    if spec.risk_level == 'LOW'
+    and (
+        spec.executor_key in READ_EXECUTORS
+        or spec.executor_key in {
+            'monthly_analytics',
+            'annual_analytics',
+            'transaction_anomalies',
+            'knowledge_search',
+        }
     )
 )
 
