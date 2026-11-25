@@ -1,4 +1,8 @@
-"""Dynamic read-only LangGraph. Mutations are not supported by this graph."""
+"""Dynamic read-only LangGraph. D10 optionally dispatches reads over MCP stdio.
+
+No bank write tools are exposed through MCP. D1-D9 direct path remains available
+with BANKPILOT_MCP_READ_MODE=off.
+"""
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -9,6 +13,9 @@ from app import banking_client as bank
 from app.graph.task_planner import plan_tasks
 from app.graph.task_registry import TASK_REGISTRY
 from app.rag.answer import answer_public_question
+from app.mcp.dispatch import execute_mcp_read
+from app.mcp.policy import read_mode
+
 
 class Context(TypedDict):
     authorization: str
@@ -67,65 +74,35 @@ def schedule_reads(state: State):
     return [Send('execute_read', {'task': item}) for item in state['plan']['tasks']]
 
 
-
-async def execute_read(
-        state: dict,
-        runtime: Runtime[Context],
-) -> dict:
-
-    task = state["task"]
-    task_type = task["type"]
+async def execute_read(state: dict, runtime: Runtime[Context]) -> dict:
+    task = state['task']
+    task_type = task['type']
 
     if task_type not in READ_TASK_TYPES:
-        raise ValueError("未授权的只读任务类型。")
+        raise ValueError('未授权的只读任务类型。')
 
     spec = TASK_REGISTRY[task_type]
-    bearer = runtime.context["authorization"]
+    bearer = runtime.context['authorization']
 
-    if task_type == "knowledge_search":
-        data = await answer_public_question(
-            task["query"]
-        )
-
-    elif task_type == "monthly_analytics":
-        data = await bank.get_monthly_analytics(
-            task["month"],
-            bearer,
-        )
-
-    elif task_type == "annual_analytics":
-        data = await bank.get_annual_analytics(
-            task["year"],
-            bearer,
-        )
-
-    elif task_type == "transaction_anomalies":
-        data = await bank.get_transaction_anomalies(
-            task["month"],
-            bearer,
-        )
-
+    if read_mode() == 'on':
+        # D10: model still chooses a registered task; MCP only executes reads.
+        # A read error is NOT silently routed to the direct executor.
+        data = await execute_mcp_read(task, bearer)
+    elif task_type == 'knowledge_search':
+        data = await answer_public_question(task['query'])
+    elif task_type == 'monthly_analytics':
+        data = await bank.get_monthly_analytics(task['month'], bearer)
+    elif task_type == 'annual_analytics':
+        data = await bank.get_annual_analytics(task['year'], bearer)
+    elif task_type == 'transaction_anomalies':
+        data = await bank.get_transaction_anomalies(task['month'], bearer)
     else:
-        handler = READ_EXECUTORS.get(
-            spec.executor_key
-        )
-
+        handler = READ_EXECUTORS.get(spec.executor_key)
         if handler is None:
-            raise ValueError(
-                f"未找到任务 {task_type} 的受控只读执行器。"
-            )
-
+            raise ValueError(f'未找到任务 {task_type} 的受控只读执行器。')
         data = await handler(bearer)
 
-    return {
-        "results": {
-            task_type: {
-                "status": "SUCCESS",
-                "data": data,
-            }
-        }
-    }
-
+    return {'results': {task_type: {'status': 'SUCCESS', 'data': data}}}
 
 
 def finish(state: State) -> dict:
