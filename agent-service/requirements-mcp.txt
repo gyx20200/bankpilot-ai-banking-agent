@@ -1,0 +1,3 @@
+# D10: 2026 official MCP SDK v2; requires Python >=3.11.
+# Verify resolved versions against project Python/LangGraph deps on your machine.
+mcp>=2,<3
