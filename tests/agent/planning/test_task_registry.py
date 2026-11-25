@@ -18,6 +18,9 @@ def test_all_existing_business_tasks_are_registered():
         "create_aa_collection",
         "schedule_transfer",
         "knowledge_search",
+        "skill_monthly_finance_review",
+        "skill_account_snapshot",
+        "skill_subscription_review",
     }
 
 
