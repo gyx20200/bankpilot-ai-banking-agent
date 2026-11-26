@@ -16,7 +16,8 @@ from app.rag.answer import answer_public_question
 from app.mcp.dispatch import execute_mcp_read
 from app.mcp.policy import read_mode
 from app.skills.catalog import SKILLS
-from app.skills.runtime import run_skill
+from app.skills.d12_quality import execute_checked_skill
+
 
 
 class Context(TypedDict):
@@ -92,7 +93,11 @@ async def execute_read(state: dict, runtime: Runtime[Context]) -> dict:
         # Cannot run in direct mode; no silent fallback or money tools.
         spec_skill = SKILLS[task_type]
         params = {k: task[k] for k in spec_skill.required_params if k in task}
-        data = await run_skill(task_type, params, bearer)
+        data = await execute_checked_skill(
+            task_type,
+            params,
+            bearer
+        )
     elif read_mode() == 'on':
         # D10: model still chooses a registered task; MCP only executes reads.
         # A read error is NOT silently routed to the direct executor.
