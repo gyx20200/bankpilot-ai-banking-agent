@@ -24,6 +24,7 @@ from app.schedule_api import router as schedule_router
 from datetime import datetime, timedelta, timezone
 from app.d6_recovery_api import router as d6_recovery_router
 from app.rag.api import router as knowledge_router
+from app.skills.api import router as skills_router
 
 app = FastAPI(title="BankPilot Agent Day 6", version="0.6.0", lifespan=checkpoint_lifespan)
 app.include_router(workflow_router)
@@ -33,7 +34,7 @@ app.include_router(auth_router)
 app.include_router(conversation_router)
 app.include_router(aa_router)
 app.include_router(schedule_router)
-
+app.include_router(skills_router)
 
 class DemoLoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=128)

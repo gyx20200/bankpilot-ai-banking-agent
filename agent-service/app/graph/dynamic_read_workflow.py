@@ -15,6 +15,8 @@ from app.graph.task_registry import TASK_REGISTRY
 from app.rag.answer import answer_public_question
 from app.mcp.dispatch import execute_mcp_read
 from app.mcp.policy import read_mode
+from app.skills.catalog import SKILLS
+from app.skills.runtime import run_skill
 
 
 class Context(TypedDict):
@@ -46,6 +48,7 @@ READ_TASK_TYPES = frozenset(
             'annual_analytics',
             'transaction_anomalies',
             'knowledge_search',
+            'skill',
         }
     )
 )
@@ -84,7 +87,13 @@ async def execute_read(state: dict, runtime: Runtime[Context]) -> dict:
     spec = TASK_REGISTRY[task_type]
     bearer = runtime.context['authorization']
 
-    if read_mode() == 'on':
+    if task_type in SKILLS:
+        # D11 skill step recipes are fixed in Python and use D10 MCP reads.
+        # Cannot run in direct mode; no silent fallback or money tools.
+        spec_skill = SKILLS[task_type]
+        params = {k: task[k] for k in spec_skill.required_params if k in task}
+        data = await run_skill(task_type, params, bearer)
+    elif read_mode() == 'on':
         # D10: model still chooses a registered task; MCP only executes reads.
         # A read error is NOT silently routed to the direct executor.
         data = await execute_mcp_read(task, bearer)

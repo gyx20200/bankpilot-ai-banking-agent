@@ -28,6 +28,7 @@ from app.analytics_contract import (
 )
 from app.graph.task_registry import TASK_REGISTRY, resolve_execution_order
 
+
 class PlannerError(Exception):
     """The model did not produce a safe, usable task plan."""
 
@@ -101,9 +102,9 @@ def _recent_context_turns(planner_context):
 
 
 def build_planner_messages(
-    system: str,
-    message: str,
-    planner_context: PlannerContext | None = None,
+        system: str,
+        message: str,
+        planner_context: PlannerContext | None = None,
 ) -> list[dict]:
     # Keep system policy first, then chronological history, then current input.
     messages = [{"role": "system", "content": system}]
@@ -111,9 +112,9 @@ def build_planner_messages(
     if planner_context is not None:
         context_message = _context_value(planner_context, "current_message")
         if (
-            isinstance(context_message, str)
-            and context_message.strip()
-            and context_message.strip() != message.strip()
+                isinstance(context_message, str)
+                and context_message.strip()
+                and context_message.strip() != message.strip()
         ):
             raise PlannerError("当前消息与会话上下文不一致。")
 
@@ -134,9 +135,9 @@ def build_planner_messages(
 
 
 def contextual_month_from_history(
-    message: str,
-    planner_context: PlannerContext | None,
-    today: date,
+        message: str,
+        planner_context: PlannerContext | None,
+        today: date,
 ) -> str | None:
     # Inherit a year only when the current message states one unambiguous month.
     if _month_in_request(message, today) is not None:
@@ -210,7 +211,8 @@ def validate_plan(raw: dict, today: date | None = None, message: str | None = No
         raise PlannerError("不能跳过银行确认或安全验证；本次没有执行业务操作。")
 
     if draft.unhandled_requests:
-        return _clarify(draft.tasks, "当前还不能处理请求中的全部业务，请拆分或修改指令：" + "、".join(draft.unhandled_requests))
+        return _clarify(draft.tasks,
+                        "当前还不能处理请求中的全部业务，请拆分或修改指令：" + "、".join(draft.unhandled_requests))
     if not draft.tasks:
         raise PlannerError("没有识别到受支持的银行任务；本次未执行业务操作。")
 
@@ -233,9 +235,27 @@ def validate_plan(raw: dict, today: date | None = None, message: str | None = No
 
         # Parameters must match the registered task rather than just matching
         # the generic Task model. No account numbers, IDs or executor URLs here.
-        for name in ("month", "year","query", "target_name", "payee_name", "payee_phone", "remark", "amount", "aa_participants", "aa_mode", "aa_reason", "execute_at", "time_expression"):
+        for name in ("month", "year", "query", "target_name", "payee_name", "payee_phone", "remark", "amount",
+                     "aa_participants", "aa_mode", "aa_reason", "execute_at", "time_expression"):
             if name not in spec.required_params and name in task.model_fields_set:
                 raise PlannerError(f"任务 {task.type} 不接受参数 {name}。")
+
+        # D11: 月度财务体检技能参数校验
+        if task.type == "skill_monthly_finance_review":
+            if not valid_month(task.month) or task.month > current_month:
+                return _clarify(
+                    draft.tasks,
+                    "财务体检需要有效的历史或当前年月，例如2026年10月。",
+                )
+
+            if message is not None:
+                expected = _month_in_request(message, current)
+
+                if expected != task.month:
+                    return _clarify(
+                        draft.tasks,
+                        "请在当前指令中明确指定财务体检月份，例如2026年10月。",
+                    )
 
         if task.type == "knowledge_search":
             try:
@@ -257,15 +277,15 @@ def validate_plan(raw: dict, today: date | None = None, message: str | None = No
 
         if task.type == "annual_analytics":
             if not valid_year(task.year) or int(task.year) > current.year:
-                return _clarify(draft.tasks,"请提供有效的历史或当前年份，例如2026年度。")
+                return _clarify(draft.tasks, "请提供有效的历史或当前年份，例如2026年度。")
             if message is not None and explicit_annual_year(message) != task.year:
-                return _clarify(draft.tasks,"请在当前指令中明确指定年度，例如2026年度；不能将某个月份当成年度请求。")
+                return _clarify(draft.tasks, "请在当前指令中明确指定年度，例如2026年度；不能将某个月份当成年度请求。")
 
         if task.type == "transaction_anomalies":
             if not valid_month(task.month) or task.month > current_month:
-                return _clarify(draft.tasks,"请提供有效的历史或当前月份，例如2026年10月。")
+                return _clarify(draft.tasks, "请提供有效的历史或当前月份，例如2026年10月。")
             if message is not None and _month_in_request(message, current) != task.month:
-                return _clarify(draft.tasks,"请在当前指令中明确指定异常检测月份，例如2026年10月。")
+                return _clarify(draft.tasks, "请在当前指令中明确指定异常检测月份，例如2026年10月。")
 
         if task.type == "monthly_analytics":
             if task.month is None:
@@ -370,7 +390,6 @@ def validate_plan(raw: dict, today: date | None = None, message: str | None = No
     )
 
 
-
 TASK_PARAMETER_SCHEMAS = {
     "month": {
         "type": "string",
@@ -390,8 +409,10 @@ TASK_PARAMETER_SCHEMAS = {
     },
     "payee_phone": {"type": "string", "description": "收款人已经注册的11位手机号，不是银行账号"},
     "remark": {"type": "string", "description": "用户原话中出现的可选转账备注，最多80个字符"},
-    "time_expression": {"type": "string", "description": "预约时间在用户原话中出现的原文片段，必须逐字摘录，不允许改写，例如'明天下午3点'、'2分钟后'"},
-    "execute_at": {"type": "string", "description": "由模型将用户的预约时间转换为北京时间ISO8601：YYYY-MM-DDTHH:MM:SS+08:00；例如2026-11-30T21:37:00+08:00。不可猜测或省略时区。"},
+    "time_expression": {"type": "string",
+                        "description": "预约时间在用户原话中出现的原文片段，必须逐字摘录，不允许改写，例如'明天下午3点'、'2分钟后'"},
+    "execute_at": {"type": "string",
+                   "description": "由模型将用户的预约时间转换为北京时间ISO8601：YYYY-MM-DDTHH:MM:SS+08:00；例如2026-11-30T21:37:00+08:00。不可猜测或省略时区。"},
     "aa_participants": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 10,
                         "description": "需付款的其他注册用户姓名或手机号，不包括自己；仅使用原文出现的姓名/手机号"},
     "aa_mode": {"type": "string", "enum": ["total_with_self", "per_person"],
@@ -495,7 +516,6 @@ PLANNER_TOOL = {
 }
 
 
-
 async def plan_tasks(message: str, planner_context: PlannerContext | None = None) -> TaskPlan:
     """One LLM request; return a validated task plan, never call bank APIs."""
     if not llm_router.enabled() or not llm_router.configured():
@@ -524,6 +544,21 @@ async def plan_tasks(message: str, planner_context: PlannerContext | None = None
         "仅月度收支允许在现有安全校验下继承历史月份的年份；年度与异常检测必须有当前明确期间。"
         "若用户同时要求年度分析和某月异常检测，分别规划两个只读任务，不丢失其中任何一项。"
         "异常规则命中不是确认盗刷，不执行冻结、退款或资金变更。"
+        "D11支持以下可复用Agent Skills："
+        "用户明确要求月度财务体检，或同时查询同一个月的收支和异常交易时，"
+        "优先选择skill_monthly_finance_review，参数month必须来自当前消息明确指定的月份。"
+        "用户明确要求账户概览，或同时查看余额和交易流水时，"
+        "优先选择skill_account_snapshot，不需要参数。"
+        "用户明确要求订阅巡检，或同时查看订阅协议和交易流水时，"
+        "优先选择skill_subscription_review，不需要参数。"
+        "当一个Skill已经覆盖相关查询需求时，不要重复添加对应的普通查询任务。"
+        "如果用户只要求余额、单独月度收支、单独异常检测、单独订阅查询，"
+        "继续使用原有普通任务，不要扩大用户的查询范围。"
+        "如果用户还提出其他独立业务需求，必须保留对应任务，不能因选择Skill而忽略。"
+        "Skill仅提供只读查询，不代表资金操作授权。"
+        "转账、预约转账、AA收款和取消订阅继续走原有审批工作流。"
+        "月度财务体检不得从历史消息猜测月份或继承年份。"
+        "如果当前指令中的月份无法确认，必须要求用户澄清。"
         "即时转账只规划 transfer_prepare；涉及预约/定时/未来时间转账必须规划 schedule_transfer，绝不能当作即时转账执行；"
         "预约只允许单次，收款人和数字金额必须在原话中出现。"
         "对 schedule_transfer 必须提供 time_expression 和 execute_at："
@@ -620,7 +655,7 @@ async def plan_tasks(message: str, planner_context: PlannerContext | None = None
                 [
                     call.get("function", {}).get("name")
                     for call in calls
-               ],
+                ],
                 bool(model_message.get("content")),
             )
 
