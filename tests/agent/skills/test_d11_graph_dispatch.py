@@ -23,7 +23,9 @@ def test_skill_is_dispatched_to_skill_runner(monkeypatch):
     runner = AsyncMock(return_value=report)
     direct_mcp = AsyncMock()
 
-    monkeypatch.setattr(workflow, "run_skill", runner)
+    monkeypatch.setattr(
+        workflow, "execute_checked_skill", runner
+    )
     monkeypatch.setattr(
         workflow, "execute_mcp_read", direct_mcp
     )
@@ -64,7 +66,9 @@ def test_skill_failure_never_becomes_success(monkeypatch):
 
     direct_mcp = AsyncMock()
 
-    monkeypatch.setattr(workflow, "run_skill", runner)
+    monkeypatch.setattr(
+        workflow, "execute_checked_skill", runner
+    )
     monkeypatch.setattr(
         workflow, "execute_mcp_read", direct_mcp
     )
