@@ -18,9 +18,17 @@ def test_all_existing_business_tasks_are_registered():
         "create_aa_collection",
         "schedule_transfer",
         "knowledge_search",
+
+        # D11 Agent Skills
         "skill_monthly_finance_review",
         "skill_account_snapshot",
         "skill_subscription_review",
+
+        # D13 Investment
+        "investment_compare",
+        "investment_portfolio",
+        "investment_buy",
+        "investment_redeem",
     }
 
 
@@ -86,3 +94,25 @@ def test_registry_blocks_cyclic_dependencies(monkeypatch):
     monkeypatch.setitem(TASK_REGISTRY, "cycle_b", TaskSpec("测试", "b", depends_on=("cycle_a",)))
     with pytest.raises(ValueError, match="循环"):
         resolve_execution_order(["cycle_a"])
+
+def test_d13_investment_write_tasks_are_high_risk():
+    assert TASK_REGISTRY["investment_buy"].risk_level == "HIGH"
+    assert TASK_REGISTRY["investment_redeem"].risk_level == "HIGH"
+
+
+def test_d13_investment_read_tasks_are_low_risk():
+    assert TASK_REGISTRY["investment_compare"].risk_level == "LOW"
+    assert TASK_REGISTRY["investment_portfolio"].risk_level == "LOW"
+
+
+def test_d13_investment_required_parameters():
+    for task_type in (
+            "investment_buy",
+            "investment_redeem",
+    ):
+        spec = TASK_REGISTRY[task_type]
+
+        assert set(spec.required_params) == {
+            "product_name",
+            "units",
+        }
