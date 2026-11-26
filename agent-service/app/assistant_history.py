@@ -80,7 +80,6 @@ def assistant_reply_text(view: dict) -> str:
             if item.get("status") == "SUCCESS" and isinstance(item.get("data"), list):
                 notes.append(f"已查询{len(item['data'])}条{label}记录")
 
-
         knowledge = reads.get("knowledge_search", {})
         has_public_knowledge = False
 
@@ -93,12 +92,11 @@ def assistant_reply_text(view: dict) -> str:
             ):
                 has_public_knowledge = True
 
-
                 answer_text = data.get("answer")
 
                 if (
-                    isinstance(answer_text, str)
-                    and answer_text.strip()
+                        isinstance(answer_text, str)
+                        and answer_text.strip()
                 ):
                     notes.append(
                         "公开金融资料答复："
@@ -110,6 +108,27 @@ def assistant_reply_text(view: dict) -> str:
                         "请核对相关官方来源"
                     )
 
+        # D11: 仅保存已成功完成的技能摘要
+        for skill_name in (
+                "skill_monthly_finance_review",
+                "skill_account_snapshot",
+                "skill_subscription_review",
+        ):
+            entry = reads.get(skill_name, {})
+
+            if entry.get("status") == "SUCCESS":
+                data = entry.get("data") or {}
+
+                if (
+                        isinstance(data, dict)
+                        and data.get("status") == "COMPLETED"
+                        and data.get("readOnly") is True
+                        and data.get("dataOrigin") == "JAVA_MYSQL_VIA_MCP"
+                ):
+                    summary = data.get("summary")
+
+                    if isinstance(summary, str) and summary:
+                        notes.append(summary[:350])
 
         if notes:
             if has_public_knowledge:
@@ -154,12 +173,12 @@ def assistant_request_id(conversation_id: str, user_message_request_id: str) -> 
 
 
 async def save_assistant_reply(
-    *,
-    conversation_id: str,
-    user_message_request_id: str,
-    user_message_content: str,
-    authorization: str | None,
-    reply: str,
+        *,
+        conversation_id: str,
+        user_message_request_id: str,
+        user_message_content: str,
+        authorization: str | None,
+        reply: str,
 ) -> str:
     """Return the actual stored text; failure never triggers a bank re-run."""
     try:
@@ -176,9 +195,9 @@ async def save_assistant_reply(
     if not reply or len(reply) > 2000:
         raise AssistantHistoryError("待保存的助手文字不合法")
     if not isinstance(user_message_request_id, str) or not (
-        8 <= len(user_message_request_id) <= 64
-        and all(c.isascii() and (c.isalnum() or c in "_-")
-                for c in user_message_request_id)
+            8 <= len(user_message_request_id) <= 64
+            and all(c.isascii() and (c.isalnum() or c in "_-")
+                    for c in user_message_request_id)
     ):
         raise AssistantHistoryError("用户消息 requestId 无效")
 
