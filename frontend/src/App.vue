@@ -6,6 +6,7 @@ import AaCenter from "./components/AaCenter.vue";
 import ScheduleCenter from "./components/ScheduleCenter.vue";
 import WorkflowRecoveryCenter from "./components/WorkflowRecoveryCenter.vue";
 import ConversationSidebar from './components/ConversationSidebar.vue';
+import InvestmentCenter from "./components/InvestmentCenter.vue";
 
 // Day 6 4G: one input -> dynamic planner -> LangGraph -> bank. No direct Java call.
 const conversations = ref([]);
@@ -1021,6 +1022,10 @@ onUnmounted(() => window.removeEventListener("keydown", onGlobalKeydown));
         />
       </section>
       <section v-else class="bp-content">
+        <details class="bp-investment-panel">
+          <summary>模拟理财中心（D13，独立审批）</summary>
+          <InvestmentCenter :token="token" />
+        </details>
         <p v-if="authNotice" class="session-notice" role="alert">
           {{ authNotice }}
         </p>

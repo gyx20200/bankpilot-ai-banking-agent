@@ -49,6 +49,8 @@ class Task(BaseModel):
     aa_participants: list[str] | None = None
     aa_mode: str | None = None
     aa_reason: str | None = None
+    product_name: str | None = None
+    units: str | None = None
 
 
 class Draft(BaseModel):
@@ -236,7 +238,7 @@ def validate_plan(raw: dict, today: date | None = None, message: str | None = No
         # Parameters must match the registered task rather than just matching
         # the generic Task model. No account numbers, IDs or executor URLs here.
         for name in ("month", "year", "query", "target_name", "payee_name", "payee_phone", "remark", "amount",
-                     "aa_participants", "aa_mode", "aa_reason", "execute_at", "time_expression"):
+                     "aa_participants", "aa_mode", "aa_reason", "execute_at", "time_expression", "product_name", "units"):
             if name not in spec.required_params and name in task.model_fields_set:
                 raise PlannerError(f"任务 {task.type} 不接受参数 {name}。")
 
@@ -256,6 +258,13 @@ def validate_plan(raw: dict, today: date | None = None, message: str | None = No
                         draft.tasks,
                         "请在当前指令中明确指定财务体检月份，例如2026年10月。",
                     )
+
+        if task.type in ('investment_buy','investment_redeem'):
+            if message is None or not task.product_name or task.product_name not in message:
+                return _clarify(draft.tasks, '请在当前消息明确填写产品列表中的完整理财产品名称。')
+            if (not isinstance(task.units,str) or not re.fullmatch(r'[0-9]{1,6}(?:\.[0-9]{1,2})?',task.units)
+                or float(task.units)<=0 or not re.search(r'(?<!\d)'+re.escape(task.units)+r'\s*份',message)):
+                return _clarify(draft.tasks, '请在当前消息明确填写数字份数，例如10份，不能由模型猜测。')
 
         if task.type == "knowledge_search":
             try:
@@ -391,6 +400,9 @@ def validate_plan(raw: dict, today: date | None = None, message: str | None = No
 
 
 TASK_PARAMETER_SCHEMAS = {
+    "product_name": {"type":"string", "description":"必须从本次原话中逐字摘录的完整模拟理财产品名称"},
+    "units": {"type":"string", "description":"用户本次原话中的数字份数，不要补小数或换算，如10份填10"},
+
     "month": {
         "type": "string",
         "description": "月度收支或异常检测的月份 YYYY-MM"
@@ -544,6 +556,10 @@ async def plan_tasks(message: str, planner_context: PlannerContext | None = None
         "仅月度收支允许在现有安全校验下继承历史月份的年份；年度与异常检测必须有当前明确期间。"
         "若用户同时要求年度分析和某月异常检测，分别规划两个只读任务，不丢失其中任何一项。"
         "异常规则命中不是确认盗刷，不执行冻结、退款或资金变更。"
+        "D13独立理财中心：比较现有模拟理财产品使用investment_compare；查询本人模拟持仓使用investment_portfolio。"
+        "明确申购/买入指定模拟理财产品且含数字份数时使用investment_buy；赎回/卖出使用investment_redeem。"
+        "product_name必须逐字摘录原文中的完整产品名称，units必须逐字摘录原文份数，例如10份填10。"
+        "严禁猜测产品ID、份数、风险等级；理财写操作仅由受认证的理财中心审批，MCP仍只读。"
         "D11支持以下可复用Agent Skills："
         "用户明确要求月度财务体检，或同时查询同一个月的收支和异常交易时，"
         "优先选择skill_monthly_finance_review，参数month必须来自当前消息明确指定的月份。"
