@@ -155,7 +155,7 @@ public class DemoCardService {
         Card existing=card(uid,cid);
         var prior=jdbc.query("""
             SELECT card_id,new_single_limit,disable_online FROM demo_card_limit_events
-             WHERE user_id=? AND request_id=? FOR UPDATE
+             WHERE user_id=? AND request_id=?
             """,(rs,i)->new LimitEvent(rs.getLong(1),rs.getBigDecimal(2),rs.getBoolean(3)),uid,rid);
         if(!prior.isEmpty()) {
             LimitEvent e=prior.get(0);
