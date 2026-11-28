@@ -4,6 +4,7 @@ import pytest
 from app.graph.task_registry import TASK_REGISTRY, TaskSpec, resolve_execution_order
 
 
+
 def test_all_existing_business_tasks_are_registered():
     assert set(TASK_REGISTRY) == {
         "get_balance",
@@ -29,7 +30,12 @@ def test_all_existing_business_tasks_are_registered():
         "investment_portfolio",
         "investment_buy",
         "investment_redeem",
+
+        # D14 Virtual Cards
+        "card_list",
+        "card_apply",
     }
+
 
 
 def test_legacy_llm_tool_names_are_mapped_correctly():
