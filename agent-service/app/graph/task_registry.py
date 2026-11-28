@@ -35,6 +35,8 @@ TASK_REGISTRY: dict[str, TaskSpec] = {
     'investment_buy': TaskSpec(description='申购指定名称模拟理财产品的明确份额；必须人工审批',executor_key='d13_investment_write',risk_level='HIGH',required_params=('product_name','units')),
     'investment_redeem': TaskSpec(description='赎回本人指定模拟理财产品的明确份额；必须人工审批',executor_key='d13_investment_write',risk_level='HIGH',required_params=('product_name','units')),
 
+    'card_list': TaskSpec(description='查询本人模拟虚拟卡与限制配置；只读', executor_key='d14_card_read', risk_level='LOW'),
+    'card_apply': TaskSpec(description='申请虚拟模拟借记卡；只准备订单，必须本人审批', executor_key='d14_card_write', risk_level='MEDIUM'),
 }
 
 def resolve_execution_order(requested:Iterable[str])->list[str]:

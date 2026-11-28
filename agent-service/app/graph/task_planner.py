@@ -560,6 +560,8 @@ async def plan_tasks(message: str, planner_context: PlannerContext | None = None
         "明确申购/买入指定模拟理财产品且含数字份数时使用investment_buy；赎回/卖出使用investment_redeem。"
         "product_name必须逐字摘录原文中的完整产品名称，units必须逐字摘录原文份数，例如10份填10。"
         "严禁猜测产品ID、份数、风险等级；理财写操作仅由受认证的理财中心审批，MCP仍只读。"
+        "D14独立卡片中心：查询我的虚拟模拟卡/卡片限制请选择card_list；明确申请虚拟模拟银行卡请选择card_apply。"
+        "card_apply只生成待审批申请，必须由用户在独立卡片中心确认，不能触发支付、授信、锁卡或挂失。"
         "D11支持以下可复用Agent Skills："
         "用户明确要求月度财务体检，或同时查询同一个月的收支和异常交易时，"
         "优先选择skill_monthly_finance_review，参数month必须来自当前消息明确指定的月份。"

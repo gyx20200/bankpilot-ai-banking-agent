@@ -26,6 +26,7 @@ from app.d6_recovery_api import router as d6_recovery_router
 from app.rag.api import router as knowledge_router
 from app.skills.api import router as skills_router
 from app.investments.api import router as investments_router
+from app.cards.api import router as cards_router
 
 app = FastAPI(title="BankPilot Agent Day 6", version="0.6.0", lifespan=checkpoint_lifespan)
 app.include_router(workflow_router)
@@ -37,6 +38,7 @@ app.include_router(aa_router)
 app.include_router(schedule_router)
 app.include_router(skills_router)
 app.include_router(investments_router)
+app.include_router(cards_router)
 
 class DemoLoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=128)
