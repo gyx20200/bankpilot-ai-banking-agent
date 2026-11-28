@@ -30,6 +30,11 @@ TASK_REGISTRY: dict[str, TaskSpec] = {
     'skill_monthly_finance_review': TaskSpec(description='Agent Skill：月度财务体检，需明确年月；只读组合执行月度收支和异常规则查询',executor_key='skill',required_params=('month',)),
     'skill_account_snapshot': TaskSpec(description='Agent Skill：账户概览，同时只读查询本人余额和交易流水',executor_key='skill'),
     'skill_subscription_review': TaskSpec(description='Agent Skill：订阅巡检，同时只读查询本人订阅协议和流水，不执行取消',executor_key='skill'),
+    'investment_compare': TaskSpec(description='比较 Java/MySQL 模拟理财产品与风险等级',executor_key='d13_investment_read'),
+    'investment_portfolio': TaskSpec(description='查询本人模拟理财持仓',executor_key='d13_investment_read'),
+    'investment_buy': TaskSpec(description='申购指定名称模拟理财产品的明确份额；必须人工审批',executor_key='d13_investment_write',risk_level='HIGH',required_params=('product_name','units')),
+    'investment_redeem': TaskSpec(description='赎回本人指定模拟理财产品的明确份额；必须人工审批',executor_key='d13_investment_write',risk_level='HIGH',required_params=('product_name','units')),
+
 }
 
 def resolve_execution_order(requested:Iterable[str])->list[str]:
